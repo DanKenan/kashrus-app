@@ -7,17 +7,17 @@ import { createHash, randomUUID } from 'node:crypto';
 import { parseUpload, uploadRowsError, uploadTypeError, type UploadedFile } from './upload.ts';
 import { createAirtableConnector, type AirtableCompanyField } from './airtable.ts';
 import { registerCompanyItems } from './company-items.ts';
-import { guardSourceWrite } from './write.ts';
-import { CompanyLinkError, mapSourceLists, companyLinkResolver } from './mapping.ts';
-import { summarizeValues, customFieldTypes, isMappedCustomField, type SourceSection } from '../../lib/sourcePreview.ts';
+import { fail, guardSourceWrite, recordIdPattern, serializeItemFields, type AirtableField } from './write.ts';
+import { CompanyLinkError, mapSourceLists, companyLinkResolver, describeAirtableMapping, entitySections, linkIds, mappingFields, rowMatchesEntity } from './mapping.ts';
+import { airtableMappingCopy, summarizeValues, customFieldTypes, isMappedCustomField, type SourceSection } from '../../lib/sourcePreview.ts';
 import { createConnector, type SourceSettings } from './stubs.ts';
-import { createSourceCache, nextNightlyRun } from './cache.ts';
+import { createSourceCache, nextNightlyRun, type SourceState } from './cache.ts';
 import { encryptKey, decryptKey, keyHint } from './crypto.ts';
 import { guessMapping } from './mapping.ts';
-import { normalizeConnection, createSourceStore, type Connection } from './store.ts';
+import { normalizeConnection, createSourceStore, type AirtableEditLedgerEntry, type Connection } from './store.ts';
 import type { AddTarget, AirtableEditAudit, Change, Edit } from './tagged-row.ts';
 import { cellText } from './tabular.ts';
-import type { Company, SourceMapping } from './types.ts';
+import type { Company, EntityMapping, RelationshipMapping, SourceMapping, SourceRow } from './types.ts';
 
 const unreadableKey = "The saved key can't be read. Enter the key again in Settings.";
 class SavedKeyError extends Error {
@@ -35,6 +35,12 @@ function settings(body: any, mapping = true) {
   const m = body.mapping;
   const str = (v: any) => typeof v === 'string' && v.length <= 200;
   if (!m || typeof m !== 'object' || Array.isArray(m)) throw Error('Invalid mapping');
+  if (m.version === 2) {
+    if (body.sourceType !== 'airtable') throw Error('Invalid mapping');
+    pilotMapping(m);
+    return;
+  }
+  if (m.version !== undefined && m.version !== 1) throw Error('Invalid mapping');
   for (const kind of ['companies', 'ingredients', 'products']) {
     const c = m[kind];
     if (body.sourceType !== 'airtable' && kind !== 'companies' && c?.table === '') continue;
@@ -91,10 +97,63 @@ function settings(body: any, mapping = true) {
     }
   }
 }
+function pilotMapping(input: any): SourceMapping {
+  const key = (value: unknown) => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,80}$/.test(value);
+  const ref = (value: unknown, prefix: string) => key(value) && (value as string).startsWith(prefix);
+  const object = (value: unknown) => !!value && typeof value === 'object' && !Array.isArray(value);
+  const invalid = () => fail(400, 'Invalid mapping');
+  if (input?.version !== 2 || !Array.isArray(input.entities) || input.entities.length > 3 ||
+      !Array.isArray(input.relationships) || input.relationships.length > 2 ||
+      !Array.isArray(input.group1Values) || input.group1Values.length > 50 ||
+      !input.group1Values.every((v: unknown) => typeof v === 'string' && v.length <= 200)) invalid();
+  const entities: EntityMapping[] = input.entities.map((e: any) => {
+    if (!object(e) || !key(e.id) || !Object.hasOwn(entitySections, e.kind) || !ref(e.tableId, 'tbl') || !object(e.fields)) invalid();
+    const kind = e.kind as keyof typeof entitySections;
+    const fields = Object.fromEntries(Object.entries(e.fields).map(([name, raw]) => {
+      const f = raw as EntityMapping['fields'][string];
+      if (!Object.hasOwn(mappingFields[kind], name) || !object(f) || !ref(f.fieldId, 'fld') ||
+          !key(f.expectedType) || typeof f.writable !== 'boolean') invalid();
+      return [name, {fieldId: f.fieldId, expectedType: f.expectedType, writable: f.writable}];
+    }));
+    const f = e.filter;
+    if (f !== undefined && (!object(f) || !ref(f.fieldId, 'fld') || !['equals', 'in'].includes(f.operator) ||
+        !Array.isArray(f.values) || !f.values.length || f.values.length > 50 || f.operator === 'equals' && f.values.length !== 1 ||
+        !f.values.every((v: unknown) => typeof v === 'string' && !!v && v.length <= 200) || new Set(f.values).size !== f.values.length)) invalid();
+    return { id: e.id, kind, tableId: e.tableId, fields, ...(f && { filter: {fieldId: f.fieldId, operator: f.operator, values: f.values} }) };
+  });
+  if (new Set(entities.map(e => e.id)).size !== entities.length || new Set(entities.map(e => e.kind)).size !== entities.length) invalid();
+  const company = entities.find(e => e.kind === 'company');
+  if (company && entities.some(e => e.kind !== 'company' && e.tableId === company.tableId)) invalid();
+  const relationships: RelationshipMapping[] = input.relationships.map((r: any) => {
+    if (!object(r) || !key(r.id) || !entities.some(e => e.id === r.fromEntity && e.kind !== 'company') ||
+        r.toEntity !== company?.id || !ref(r.fieldId, 'fld') ||
+        !['linked-record', 'reverse-linked-record', 'text-reference'].includes(r.kind) ||
+        r.ownership !== (r.kind === 'reverse-linked-record' ? 'to' : 'from') ||
+        !['one-to-one', 'many-to-one', 'many-to-many'].includes(r.cardinality) || typeof r.writable !== 'boolean') invalid();
+    return { id: r.id, fromEntity: r.fromEntity, toEntity: r.toEntity, kind: r.kind, ownership: r.ownership,
+      cardinality: r.cardinality, writable: r.kind !== 'text-reference' && r.writable, fieldId: r.fieldId };
+  });
+  if (new Set(relationships.map(r => r.id)).size !== relationships.length || new Set(relationships.map(r => r.fromEntity)).size !== relationships.length) invalid();
+  const mapping = { ...structuredClone(emptyMapping), version: 2 as const, entities, relationships, group1Values: input.group1Values };
+  for (const entity of entities) Object.assign(mapping[entitySections[entity.kind as keyof typeof entitySections]],
+    { table: entity.tableId }, Object.fromEntries(Object.entries(entity.fields).map(([name, f]) => [name, f.fieldId])));
+  return mapping;
+}
+
 function companySourceIdentity(c: Connection | undefined) {
   if (!c?.mapping.companies?.table) return undefined;
   const { file, table } = c.mapping.companies;
   return createHash('sha256').update(JSON.stringify([c.sourceType, file?.id || c.baseId, table])).digest('base64url');
+}
+
+function connectedItemLists(connection: Connection | undefined, state: SourceState) {
+  if (connection?.sourceType !== 'airtable' || connection.mapping.version !== 2) return undefined;
+  const configured = (kind: 'ingredient' | 'product') => {
+    const entity = connection.mapping.entities?.find(e => e.kind === kind);
+    const relation = connection.mapping.relationships?.find(r => r.fromEntity === entity?.id);
+    return state.connectedLists?.[kind] ?? !!(entity && relation);
+  };
+  return { ingredients: configured('ingredient'), products: configured('product'), contacts: false };
 }
 
 type LinkCompany = Pick<Company, 'id' | 'sourceKey' | 'name'>;
@@ -162,9 +221,9 @@ export function registerSourceRoutes(app: any, deps: {
     const eligibility = { baseId: c.baseId, tokenKey: c.encryptedKey, access: result.access, at: eligibilityTime(), typeOptions: adapter.typeOptions() };
     return { eligibility, tables: result.tables };
   }
-  async function editorEligibility(c: Connection, adapter: ReturnType<typeof airtable>) {
+  async function editorEligibility(c: Connection, adapter: ReturnType<typeof airtable>, fresh = false) {
     const cached = baseWriteEligibility.get(c.agencyId);
-    if (cached && cached.baseId === c.baseId && cached.tokenKey === c.encryptedKey && eligibilityTime() < cached.at + 5 * 60_000)
+    if (!fresh && cached && cached.baseId === c.baseId && cached.tokenKey === c.encryptedKey && eligibilityTime() < cached.at + 5 * 60_000)
       return cached;
     const { eligibility } = await verifyBaseAccess(c, adapter, true);
     if (eligibility.access !== 'readwrite') {
@@ -727,7 +786,7 @@ export function registerSourceRoutes(app: any, deps: {
       const record = await adapter.readCompany(recordId);
       if (record.recordId !== recordId) return res.status(404).json({ error: 'Company record not found.' });
       res.set?.('Cache-Control', 'no-store');
-      res.json({ warnings: record.warnings, fields: record.values, baseId: c.baseId, updatedAt: c.updatedAt, access: eligibility.access, typeOptions: eligibility.typeOptions });
+      res.json({ warnings: record.warnings, fields: record.values, ...('readOnlyFields' in record && {readOnlyFields: record.readOnlyFields}), baseId: c.baseId, updatedAt: c.updatedAt, access: eligibility.access, typeOptions: eligibility.typeOptions });
     } catch (cause) { return editError(res, await permissionError(c, adapter, cause)); }
   }));
 
@@ -755,7 +814,7 @@ export function registerSourceRoutes(app: any, deps: {
       if (baseId !== c.baseId || updatedAt !== c.updatedAt) sheetConflict('The source connection changed. Reopen the company.');
       editableCompany(c, recordId);
       adapter = airtable(c);
-      const eligibility = await editorEligibility(c, adapter);
+      const eligibility = await editorEligibility(c, adapter, c.mapping.version === 2);
       for (const field of changed) {
         if (!c.mapping.companies[field])
           throw Object.assign(Error('Only mapped list columns can be edited.'), { status: 400 });
@@ -764,12 +823,23 @@ export function registerSourceRoutes(app: any, deps: {
       }
       if ('name' in fields) {
         const { data, links } = await adapter.renameData();
-        if (associationChanges(links, data.companies, data.otherCompanies ?? [], recordId, fields.name, 'ignore'))
-          sheetConflict('This name change would change company links. Use permanent company IDs before renaming.');
+        const normalize = (value: string) => value.trim().toLowerCase();
+        const prior = data.companies.find(company => company.id === recordId)?.name;
+        const relinks = c.mapping.version === 2
+          ? prior !== undefined && normalize(prior) !== normalize(fields.name) && links.some(value =>
+              typeof value === 'string' && !!value.trim() && [normalize(prior), normalize(fields.name)].includes(normalize(value)))
+          : associationChanges(links, data.companies, data.otherCompanies ?? [], recordId, fields.name, 'ignore');
+        if (relinks) sheetConflict('This name change would change company links. Use permanent company IDs before renaming.');
       }
       if (fields.type && eligibility.typeOptions && !eligibility.typeOptions.includes(fields.type))
         throw Object.assign(Error('Choose a type from the Airtable column options.'), { status: 400 });
       const before = await adapter.readCompany(recordId);
+      if ('readOnlyFields' in before && before.readOnlyFields?.some(field => changed.includes(field as AirtableCompanyField)))
+        fail(400, 'Only mapped list columns can be edited.');
+      if (c.mapping.version === 2 && fields.type) {
+        const type = (await adapter.pilotSchema('readwrite')).entities.company?.fields.type;
+        if (!type?.options?.choices?.some(choice => choice.name === fields.type)) fail(400, 'Choose a type from the Airtable column options.');
+      }
       entry.writeEvidence.verifyGet = before;
       if (before.recordId !== recordId) throw Object.assign(Error('Company record not found.'), { status: 404 });
       const included = changed.filter(field => {
@@ -828,6 +898,274 @@ export function registerSourceRoutes(app: any, deps: {
     if (recent.length >= 30) throw Object.assign(Error('Too many writes. Try again in a minute.'), { status: 429 });
     recent.push(Date.now());
     writeTimes.set(id, recent);
+  }
+  const pilotPath = '/api/sources/companies/:companyId/mapping-items/:list';
+  const pilotRowPath = pilotPath + '/:rowId';
+  type PilotContext = Awaited<ReturnType<typeof pilotContext>>;
+  async function pilotContext(req: any, id: string, user: any) {
+    const c = connections.get(id);
+    if (c?.sourceType !== 'airtable' || c.mapping.version !== 2) fail(409, 'This operation requires a flexible Airtable mapping.');
+    if (req.kiosk || user.role !== 'admin' || !await deps.itemVisible?.(user, req.params.companyId)) fail(403, 'Forbidden');
+    editableCompany(c, req.params.companyId);
+    if (c.access !== 'readwrite') fail(403, 'This source is read only.');
+    if (cache.state(id).status !== 'ok') fail(409, 'Refresh the source before editing.');
+    const adapter = airtable(c), writing = req.method !== 'GET';
+    if (writing) {
+      await editorEligibility(c, adapter, true);
+      limitWrites(id);
+      if (req.body?.baseId !== c.baseId || req.body?.updatedAt !== c.updatedAt) fail(409, airtableMappingCopy.stale);
+    } else await editorEligibility(c, adapter);
+    const schema = await adapter.pilotSchema('readwrite');
+    const list = req.params.list as 'ingredients' | 'products';
+    const kind = list === 'ingredients' ? 'ingredient' : list === 'products' ? 'product' : fail(404, 'List not found.');
+    const entity = schema.entities[kind], company = schema.entities.company, relation = schema.relationships[kind];
+    if (!entity || !company || !relation) fail(409, schema.issues.find(issue => issue.entity === kind)?.message || airtableMappingCopy.schemaChanged);
+    await adapter.readCompany(req.params.companyId);
+    return { c, adapter, schema, list, kind, entity, company, relation, companyId: req.params.companyId as string };
+  }
+  function pilotRoute(fn: (ctx: PilotContext, req: any, res: any, user: any) => Promise<unknown>) {
+    return mutation(async (req: any, res: any, { id, user }: any) => {
+      res.set?.('Cache-Control', 'no-store');
+      if (req.method !== 'GET' && blocked(res)) return;
+      const run = async () => {
+        const ctx = await pilotContext(req, id, user);
+        try { return await fn(ctx, req, res, user); }
+        catch (error: any) { return editError(res, await permissionError(ctx.c, ctx.adapter, error), { ...(error.outcome && {outcome: error.outcome}) }); }
+      };
+      return req.method === 'GET' ? run() : deps.companyRemoval?.withRemoval(id, run) ?? run();
+    });
+  }
+  const fingerprint = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  function pilotLinks(ctx: PilotContext, item: SourceRow, companies: SourceRow[]) {
+    const { relation, company } = ctx, field = relation.field.id;
+    let links: string[];
+    const owners = new Map<string, string[]>();
+    if (relation.mapping.kind === 'reverse-linked-record') {
+      for (const row of companies) owners.set(row.id, linkIds(row.fields[field]) ?? fail(409, airtableMappingCopy.stale));
+      links = [...owners].filter(([, ids]) => ids.includes(item.id)).map(([id]) => id);
+    } else if (relation.mapping.kind === 'text-reference') {
+      const name = item.fields[field];
+      links = typeof name === 'string' && name.trim() ? companies.filter(row => {
+        const value = row.fields[company.fields.name.id];
+        return typeof value === 'string' && value.trim().toLowerCase() === name.trim().toLowerCase();
+      }).map(row => row.id) : [];
+      if (links.length > 1) fail(409, airtableMappingCopy.ambiguous);
+    } else {
+      links = linkIds(item.fields[field]) ?? fail(409, airtableMappingCopy.stale);
+      owners.set(item.id, links);
+    }
+    if (relation.mapping.cardinality !== 'many-to-many' && links.length > 1) fail(409, airtableMappingCopy.stale);
+    const baseline = fingerprint([ctx.c.updatedAt, relation.owner.table.id, field, item.id,
+      [...owners].sort(([a], [b]) => a.localeCompare(b)).map(([id, ids]) => [id, [...ids].sort()])]);
+    return { links, owners, baseline };
+  }
+  async function pilotRecord(ctx: PilotContext, id: string) {
+    const row = await ctx.adapter.readRecord(ctx.entity.table.id, id);
+    if (!rowMatchesEntity(row, ctx.entity)) fail(409, airtableMappingCopy.stale);
+    return row;
+  }
+  function pilotCompanies(ctx: PilotContext, rows: SourceRow[]) {
+    return rows.filter(row => rowMatchesEntity(row, ctx.company)).flatMap(row => {
+      try { editableCompany(ctx.c, row.id); }
+      catch { return []; }
+      return [{ id: row.id, name: row.fields[ctx.company.fields.name.id] }];
+    });
+  }
+  app.get(pilotPath, pilotRoute(async (ctx, _req, res) => {
+    const rows = await ctx.adapter.pilotRows(ctx.schema);
+    const companyRows = rows[ctx.company.table.id];
+    const companies = pilotCompanies(ctx, companyRows);
+    const items = rows[ctx.entity.table.id].filter(row => rowMatchesEntity(row, ctx.entity)).flatMap(row => {
+      try {
+        const { links } = pilotLinks(ctx, row, companyRows);
+        if (!links.includes(ctx.companyId) && (!ctx.relation.writable || ctx.relation.mapping.cardinality !== 'many-to-many' && links.length)) return [];
+        return [{ id: row.id, name: row.fields[ctx.entity.fields.name.id], assigned: links.includes(ctx.companyId) }];
+      } catch { return []; }
+    });
+    res.json({ items, companies, writable: ctx.relation.writable });
+  }));
+  app.get(pilotRowPath + '/relationship', pilotRoute(async (ctx, req, res) => {
+    if (!ctx.relation.writable) fail(409, airtableMappingCopy.schemaChanged);
+    const rows = await ctx.adapter.pilotRows(ctx.schema);
+    const item = await pilotRecord(ctx, req.params.rowId);
+    const { links, baseline } = pilotLinks(ctx, item, rows[ctx.company.table.id]);
+    res.json({ companyIds: links, baseline, baseId: ctx.c.baseId, updatedAt: ctx.c.updatedAt });
+  }));
+  function editablePilotFields(ctx: PilotContext) {
+    return Object.fromEntries(ctx.entity.bindings.filter(binding => binding.writable && binding.targetField !== 'locAttachment')
+      .map(binding => [binding.targetField, ctx.entity.fields[binding.targetField]])) as Record<string, AirtableField>;
+  }
+  function pilotValues(fields: Record<string, AirtableField>, row: SourceRow): Record<string, string | boolean | null> {
+    return Object.fromEntries(Object.entries(fields).filter(([,f]) => f.type !== 'multipleAttachments').flatMap<[string, string | boolean | null]>(([key, f]) => {
+      const value = row.fields[f.id];
+      if (f.type === 'checkbox' && (value == null || typeof value === 'boolean')) return [[key, value === true]];
+      return value == null || typeof value === 'string' ? [[key, typeof value === 'string' ? value || null : null]] : [];
+    }));
+  }
+  app.get(pilotRowPath + '/edit', pilotRoute(async (ctx, req, res) => {
+    const row = await pilotRecord(ctx, req.params.rowId);
+    const rows = await ctx.adapter.pilotRows(ctx.schema);
+    const { links } = pilotLinks(ctx, row, rows[ctx.company.table.id]);
+    if (!links.includes(ctx.companyId)) fail(403, 'Forbidden');
+    const editable = editablePilotFields(ctx);
+    res.json({ fields: pilotValues(ctx.entity.fields, row), companyIds: links, baseId: ctx.c.baseId, updatedAt: ctx.c.updatedAt,
+      readOnlyFields: Object.keys(ctx.entity.fields).filter(key => !Object.hasOwn(editable, key)),
+      warnings: ctx.schema.issues.filter(issue => issue.entity === ctx.kind).map(issue => issue.message),
+      fieldTypes: Object.fromEntries(Object.entries(ctx.entity.fields).map(([key, f]) => [key, f.type])),
+      typeOptions: Object.fromEntries(Object.entries(editable).filter(([,f]) => f.type === 'singleSelect')
+        .map(([key,f]) => [key, f.options?.choices?.map(choice => choice.name)])) });
+  }));
+  type PilotChange = { table: string; recordId: string; fieldId: string; before: string[]; after: string[]; confirmed?: boolean };
+  async function pilotOperation(ctx: PilotContext, req: any, res: any, user: any, action: AirtableEditLedgerEntry['action'],
+    execute: (entry: AirtableEditLedgerEntry, beforeSend: () => Promise<void>) => Promise<void>) {
+    const operationId = req.body?.operationId;
+    if (typeof operationId !== 'string' || !/^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i.test(operationId)) fail(400, 'Include a valid operation ID.');
+    const entry: AirtableEditLedgerEntry = { operationId, action, agencyId: ctx.c.agencyId, actorId: user.id, companyId: ctx.companyId,
+      baseId: ctx.c.baseId, updatedAt: ctx.c.updatedAt, table: ctx.entity.table.id, section: ctx.list, recordId: req.params.rowId,
+      at: new Date().toISOString(), outcome: 'attempted', requestHash: fingerprint([req.params.rowId, req.body]) };
+    const ledger = store.airtableLedger(ctx.c.agencyId, operationId);
+    const prior = await ledger.claim(entry);
+    const uncertainty = action === 'edit' ? 'Airtable may have saved these changes. Reload and review before retrying.' : airtableMappingCopy.uncertain;
+    if (prior) {
+      if (prior.actorId !== entry.actorId || prior.companyId !== entry.companyId || prior.baseId !== entry.baseId ||
+          prior.updatedAt !== entry.updatedAt || prior.section !== entry.section || prior.action !== action || prior.requestHash !== entry.requestHash)
+        fail(409, airtableMappingCopy.stale);
+      if (prior.outcome === 'confirmed') return res.json({ saved: true, ...await republishAirtable(ctx.c, ctx.adapter) });
+      fail(409, prior.outcome === 'review' || prior.relationshipChanges?.some(change => change.confirmed) ? airtableMappingCopy.partial : uncertainty);
+    }
+    let sent = false;
+    try {
+      await execute(entry, async () => { await ledger.finish(entry); sent = true; });
+    } catch (error: any) {
+      const partial = !!entry.relationshipChanges?.some(change => change.confirmed);
+      const rejected = !sent || error.definiteRejection;
+      entry.outcome = partial ? 'review' : rejected ? 'rejected' : 'unconfirmed';
+      await ledger.finish(entry);
+      if (!partial && rejected) throw error;
+      await republishAirtable(ctx.c, ctx.adapter);
+      throw Object.assign(Error(partial ? airtableMappingCopy.partial : uncertainty), { status: 409, outcome: entry.outcome });
+    }
+    entry.outcome = 'confirmed';
+    let auditWarning: string | undefined;
+    try { await ledger.finish(entry); } catch { auditWarning = 'The final edit audit could not be recorded.'; }
+    res.json({ saved: true, auditWarning, ...await republishAirtable(ctx.c, ctx.adapter) });
+  }
+  app.patch?.(pilotRowPath, pilotRoute(async (ctx, req, res, user) => {
+    const fields = editablePilotFields(ctx);
+    const requested = serializeItemFields(ctx.c, fields, req.body?.fields);
+    await pilotOperation(ctx, req, res, user, 'edit', async (entry, beforeSend) => {
+      const rows = await ctx.adapter.pilotRows(ctx.schema);
+      const row = await pilotRecord(ctx, req.params.rowId);
+      if (!pilotLinks(ctx, row, rows[ctx.company.table.id]).links.includes(ctx.companyId)) fail(403, 'Forbidden');
+      const previous = pilotValues(fields, row);
+      entry.requested = requested;
+      entry.changedFields = Object.keys(requested);
+      entry.previous = Object.fromEntries(entry.changedFields.map(key => {
+        if (!Object.hasOwn(previous, key) || !req.body.originals || !Object.hasOwn(req.body.originals, key) || previous[key] !== req.body.originals[key])
+          fail(409, 'This record changed in Airtable. Reload and review before saving.');
+        return [key, previous[key]];
+      }));
+      const patch = Object.fromEntries(Object.entries(requested).map(([key, value]) => [fields[key].id, value]));
+      await beforeSend();
+      const fresh = await pilotRecord(ctx, row.id);
+      const live = pilotValues(fields, fresh);
+      const company = ctx.relation.mapping.kind === 'reverse-linked-record'
+        ? await ctx.adapter.readRecord(ctx.company.table.id, ctx.companyId)
+        : undefined;
+      const stillLinked = company ? rowMatchesEntity(company, ctx.company) && linkIds(company.fields[ctx.relation.field.id])?.includes(row.id)
+        : pilotLinks(ctx, fresh, rows[ctx.company.table.id]).links.includes(ctx.companyId);
+      if (!stillLinked || Object.keys(requested).some(key => live[key] !== previous[key]))
+        throw Object.assign(Error('This record changed in Airtable. Reload and review before saving.'), { status: 409, definiteRejection: true });
+      await ctx.adapter.patchAndReadRecord(ctx.entity.table.id, row.id, patch, after =>
+        Object.entries(requested).every(([key, value]) => pilotValues(fields, after)[key] === value));
+    });
+  }));
+  app.post(pilotRowPath + '/relationship', pilotRoute(async (ctx, req, res, user) => {
+    const { operation, destination, baseline } = req.body ?? {};
+    if (!['assign', 'move', 'unlink'].includes(operation) || typeof baseline !== 'string' || !/^[a-f\d]{64}$/.test(baseline) ||
+        operation === 'move' && (typeof destination !== 'string' || destination === ctx.companyId || !recordIdPattern.test(destination)))
+      fail(400, 'Invalid relationship change.');
+    if (!ctx.relation.writable) fail(409, airtableMappingCopy.schemaChanged);
+    const action = operation === 'assign' ? 'restore' : operation;
+    await pilotOperation(ctx, req, res, user, action, async (entry, beforeSend) => {
+      const { adapter, company, companyId, relation } = ctx;
+      const row = await pilotRecord(ctx, req.params.rowId);
+      const rows = await adapter.pilotRows(ctx.schema);
+      const companyRows = rows[company.table.id];
+      const previous = pilotLinks(ctx, row, companyRows);
+      const alreadyAssigned = previous.links.includes(companyId);
+      const single = relation.mapping.cardinality !== 'many-to-many';
+      if (previous.baseline !== baseline || alreadyAssigned !== (operation !== 'assign') || operation === 'assign' && single && previous.links.length)
+        fail(409, airtableMappingCopy.stale);
+      const target = operation === 'move' ? destination : operation === 'assign' ? companyId : undefined;
+      if (target && (!pilotCompanies(ctx, companyRows).some(candidate => candidate.id === target) || previous.links.includes(target)))
+        fail(409, airtableMappingCopy.stale);
+      const fieldId = relation.field.id, table = relation.owner.table.id;
+      if (target) await adapter.readCompany(target);
+      if (target && relation.mapping.kind === 'linked-record' && relation.mapping.cardinality === 'one-to-one' &&
+          rows[ctx.entity.table.id].some(item => item.id !== row.id && (linkIds(item.fields[fieldId]) ?? fail(409, airtableMappingCopy.stale)).includes(target)))
+        fail(409, airtableMappingCopy.stale);
+      const changes: PilotChange[] = [];
+      const addChange = (recordId: string, add?: string, remove?: string) => {
+        const before = previous.owners.get(recordId) ?? fail(409, airtableMappingCopy.stale);
+        if (add && relation.mapping.cardinality === 'one-to-one' && before.some(id => id !== add)) fail(409, airtableMappingCopy.stale);
+        changes.push({ table, recordId, fieldId, before, after: [...before.filter(id => id !== remove), ...(add ? [add] : [])] });
+      };
+      if (relation.mapping.kind === 'reverse-linked-record') {
+        if (alreadyAssigned) addChange(companyId, undefined, row.id);
+        if (target) addChange(target, row.id);
+      } else addChange(row.id, target, alreadyAssigned ? companyId : undefined);
+      entry.table = table;
+      entry.originalIds = previous.links;
+      entry.changedFields = [fieldId];
+      entry.relationshipChanges = changes;
+      const compare = (actual: unknown, expected: string[]) => {
+        const ids = linkIds(actual);
+        return !!ids && ids.length === expected.length && expected.every(id => ids.includes(id));
+      };
+      // Read and compare both owners before the first change, then again immediately before their own PATCHes.
+      for (const change of changes) {
+        const live = await adapter.readRecord(table, change.recordId);
+        const owner = relation.owner;
+        if (!rowMatchesEntity(live, owner) || !compare(live.fields[fieldId], change.before)) fail(409, airtableMappingCopy.stale);
+      }
+      for (const change of changes) {
+        await beforeSend();
+        const live = await adapter.readRecord(table, change.recordId);
+        if (!rowMatchesEntity(live, relation.owner) || !compare(live.fields[fieldId], change.before))
+          throw Object.assign(Error(airtableMappingCopy.stale), { status: 409, definiteRejection: true });
+        await adapter.patchAndReadRecord(table, change.recordId, { [fieldId]: change.after },
+          after => compare(after.fields[fieldId], change.after));
+        change.confirmed = true;
+        await beforeSend();
+      }
+    });
+  }));
+  app.get('/api/sources/companies/:companyId/items', (req: any, res: any, next: () => void) => {
+    const user = deps.itemUser?.(req);
+    const connection = user && connections.get(user.agencyId);
+    if (connection?.sourceType === 'airtable' && connection.mapping.version === 2) {
+      const send = res.json.bind(res);
+      res.json = (body: any) => {
+        if (!Array.isArray(body?.ingredients)) return send(body);
+        const state = cache.state(user.agencyId);
+        return send({ ...body, flexibleMapping: true,
+          connectedLists: connectedItemLists(connection, state),
+          ...(user.role === 'admin' && { mappingIssues: state.mappingIssues, mappingWrites: {
+            ingredients: state.relationshipWrites?.ingredient === true, products: state.relationshipWrites?.product === true,
+          } }) });
+      };
+    }
+    next();
+  });
+  // Legacy certificate routes resolve columns by name. Flexible mappings only display validated attachments.
+  for (const path of ['/api/sources/companies/:companyId/documents', '/api/sources/companies/:companyId/items/ingredients/:rowId/documents']) {
+    app.post(path, (req: any, res: any, next: () => void) => {
+      const user = deps.itemUser?.(req);
+      if (user && connections.get(user.agencyId)?.mapping.version === 2)
+        return res.status(409).json({ error: 'This Airtable attachment field is read only.' });
+      next();
+    });
   }
   registerCompanyItems(app, {
     user: req => deps.itemUser?.(req), visible: (user, id) => deps.itemVisible?.(user, id) ?? Promise.resolve(false),
@@ -951,13 +1289,34 @@ export function registerSourceRoutes(app: any, deps: {
     if (flights.has(id)) await flights.get(id);
     await saves.get(id)?.catch(() => {});
     const old = connections.get(id), plain = req.body.apiKey?.trim();
-    if (!plain && !old?.encryptedKey) return res.status(400).json({ error: 'API key required' });
-    const c: Connection = { group1Label: req.body.group1Label?.trim() ?? old?.group1Label ?? 'Group 1', group1Overrides: old?.group1Overrides || { ingredient: {}, product: {} }, agencyId: id, sourceType: req.body.sourceType, baseId: req.body.baseId, access: req.body.access, mapping: req.body.mapping, encryptedKey: plain ? encryptKey(plain, deps.secret(), id) : old!.encryptedKey, keyHint: plain ? keyHint(plain) : old!.keyHint, updatedAt: new Date().toISOString(), updatedBy: user.id, backupHashes: old?.backupHashes || {}, ...(old?.lastRefresh ? { lastRefresh: old.lastRefresh } : {}) };
-    c.airtableDirectRemoval = old?.sourceType === 'airtable' && old.baseId === c.baseId &&
+    if (!plain && (!old?.encryptedKey || req.body.mapping.version === 2 && (old.sourceType !== 'airtable' || old.baseId !== req.body.baseId)))
+      return res.status(400).json({ error: 'API key required' });
+    if (req.body.mapping.version === 2 && blocked(res)) return;
+    const c: Connection = { group1Label: req.body.group1Label?.trim() ?? old?.group1Label ?? 'Group 1', group1Overrides: old?.group1Overrides || { ingredient: {}, product: {} }, agencyId: id, sourceType: req.body.sourceType, baseId: req.body.baseId, access: req.body.access, mapping: req.body.mapping.version === 2 ? pilotMapping(req.body.mapping) : req.body.mapping, encryptedKey: plain ? encryptKey(plain, deps.secret(), id) : old!.encryptedKey, keyHint: plain ? keyHint(plain) : old!.keyHint, updatedAt: new Date().toISOString(), updatedBy: user.id, backupHashes: old?.backupHashes || {}, ...(old?.lastRefresh ? { lastRefresh: old.lastRefresh } : {}) };
+    c.airtableDirectRemoval = c.mapping.version !== 2 && old?.sourceType === 'airtable' && old.baseId === c.baseId &&
       old.airtableDirectRemoval === true && old.mapping.companies?.table === c.mapping.companies.table;
-    const validation = await verifyBaseAccess(c, airtable(c));
+    const adapter = airtable(c);
+    const validation = await verifyBaseAccess(c, adapter);
     if (validation.eligibility.access === 'read') c.access = 'read';
-    for (const kind of ['companies', 'ingredients', 'products'] as const) {
+    if (c.mapping.version === 2) {
+      const schema = await adapter.pilotSchema(c.access);
+      const blocking = schema.issues.find(issue => issue.blocking);
+      if (blocking) return res.status(400).json({ error: blocking.message, issues: schema.issues });
+      const tables = await adapter.readSchema();
+      for (const entity of c.mapping.entities!) {
+        const table = tables.find(t => t.id === entity.tableId)!;
+        entity.tableName = table.name;
+        for (const binding of Object.values(entity.fields)) {
+          const field = table.fields.find(f => f.id === binding.fieldId);
+          if (field) binding.fieldName = field.name;
+        }
+      }
+      for (const relation of c.mapping.relationships!) {
+        const owner = c.mapping.entities!.find(e => e.id === (relation.ownership === 'to' ? relation.toEntity : relation.fromEntity));
+        const field = tables.find(t => t.id === owner?.tableId)?.fields.find(f => f.id === relation.fieldId);
+        if (field) relation.fieldName = field.name;
+      }
+    } else for (const kind of ['companies', 'ingredients', 'products'] as const) {
       const config = c.mapping[kind], table = validation.tables?.find(t => t.name === config.table);
       if (kind !== 'products' && c.mapping[kind].locAttachment && table?.fieldTypes?.[c.mapping[kind].locAttachment!] !== 'multipleAttachments')
         return res.status(400).json({ error: 'Choose an Airtable attachment column.' });
@@ -986,17 +1345,33 @@ export function registerSourceRoutes(app: any, deps: {
     const old = connections.get(id), plain = req.body.apiKey?.trim();
     if (!plain && !old) return res.status(400).json({ error: 'API key required' });
     const c = { ...old, ...req.body, agencyId: id, mapping: old?.mapping || emptyMapping } as Connection;
-    const adapter = connector(c, plain), result = await adapter.testConnection();
+    const adapter = connector(c, plain), result = await adapter.testConnection(req.body.discovery === true);
     if (old?.sourceType === 'airtable' && c.sourceType === 'airtable' && c.baseId === old.baseId &&
         (!result.ok || result.access !== 'readwrite')) baseWriteEligibility.delete(id);
     if (!result.ok) return res.json({ ok: false, error: result.error, calls: adapter.calls() });
     const guess = guessMapping(result.tables || []);
+    if (req.body.discovery === true && c.sourceType === 'airtable')
+      return res.json({ ...result, guess, legacy: old?.mapping.version !== 2 && old?.sourceType === 'airtable'
+        ? describeAirtableMapping(old.mapping, (result.tables || []).map(table => ({ id: table.id!, name: table.name, fields: table.fields! }))) : undefined,
+      calls: adapter.calls() });
     const preferred = new Set([guess.mapping.companies.table, guess.mapping.ingredients.table, guess.mapping.products.table]);
     const tables = [...(result.tables || [])].sort((a, b) => Number(preferred.has(b.name)) - Number(preferred.has(a.name)));
     let samples;
     try { samples = adapter.samples ? await adapter.samples(tables.slice(0, 15)) : {}; }
     catch { return res.json({ ok: false, error: 'Source preview failed', calls: adapter.calls() }); }
     res.json({ ...result, guess, samples, calls: adapter.calls() });
+  }));
+  app.post('/api/sources/airtable-mapping/preview', handler(async (req: any, res: any, { id }: any) => {
+    settings(req.body, false);
+    if (req.body.sourceType !== 'airtable') fail(400, 'Invalid sourceType');
+    const mapping = pilotMapping(req.body.mapping);
+    const old = connections.get(id), plain = req.body.apiKey?.trim();
+    if (!plain && (old?.sourceType !== 'airtable' || old.baseId !== req.body.baseId || !old.encryptedKey)) fail(400, 'API key required');
+    const adapter = createAirtableConnector({ baseId: req.body.baseId, apiKey: plain || storedKey(old!), mapping,
+      apiBase: deps.testMode ? apiBase : undefined });
+    const result = await adapter.testConnection();
+    if (!result.ok || !result.access) fail(400, result.error || 'Connection test failed');
+    res.json(await adapter.pilotPreview(result.access));
   }));
   app.post('/api/sources/refresh', mutation(async (_req: any, res: any, { id }: any) => {
     if (!connections.has(id)) return res.status(400).json({ error: 'No source connected' });
@@ -1030,9 +1405,12 @@ export function registerSourceRoutes(app: any, deps: {
   app.get('/api/factories/:companyId/items', handler(async (req: any, res: any, { id }: any) => {
     const source = companySourceIdentity(connections.get(id));
     if (source && deps.companyRemoval) await deps.companyRemoval.pendingRemovals(id, source);
+    const state = cache.state(id);
     if ((source && deps.companyRemoval?.removal(id, req.params.companyId, source)?.deletedAt) ||
-        !cache.state(id).companies.some(c => c.id === req.params.companyId)) return res.status(404).json({ error: 'Company not found' });
-    res.json({ ingredients: items(id, req.params.companyId, 'ingredient'), products: items(id, req.params.companyId, 'product') });
+        !state.companies.some(c => c.id === req.params.companyId)) return res.status(404).json({ error: 'Company not found' });
+    const connectedLists = connectedItemLists(connections.get(id), state);
+    res.json({ ...(connectedLists && { connectedLists }),
+      ingredients: items(id, req.params.companyId, 'ingredient'), products: items(id, req.params.companyId, 'product') });
   }));
   app.put('/api/sources/group1', mutation(async (req: any, res: any, { id, user }: any) => {
     const { kind, itemId, group1 } = req.body || {};
@@ -1353,6 +1731,7 @@ export function inspectionSourceAccessor(cache: ReturnType<typeof createSourceCa
     const connection = connections.get(agencyId), state = cache.state(agencyId);
     return {
       state, identity: companySourceIdentity(connection), connection: connection ? {...connection, fees:{...connection.fees,mashgiach:{...connection.fees?.mashgiach,...Object.fromEntries(state.companies.filter(c=>c.mashgiachFee!==undefined).map(c=>[c.id,{amount:c.mashgiachFee!,currency:'USD'}]))}}} : undefined,
+      connectedLists: connectedItemLists(connection, state),
       listVersion: (companyId: string) => connection?.backupHashes?.[companyId] || '',
       items: (companyId: string, kind: 'ingredient' | 'product') => state.itemsFor(companyId, kind).map(item => ({
         id: item.id, name: item.name, brand: item.brand ?? '', code: 'code' in item ? item.code ?? '' : '',

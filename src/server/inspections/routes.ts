@@ -512,7 +512,8 @@ export function registerInspectionRoutes(app: any, deps: {
   app.get('/api/visits/factories/:companyId', handler(false, (req: any, res: any, u: any, agency: string) => {
     const source = deps.source(agency), c = source.state.companies.find(c => c.id === req.params.companyId);
     if (!c || kind(agency, c) !== 'factory' || !active(agency, c.id) || !visible(agency, c.id, u)) return res.status(404).json({ error: 'Company not found' });
-    res.json({ company: { id: c.id, name: c.name, brand: c.brand ?? '', plant: c.plant ?? '' }, fee: visitFee(agency, c.id), listVersion: source.listVersion(c.id), group1Label: source.connection?.group1Label ?? 'Group 1', refreshedAt: source.state.refreshedAt ?? null, backupTakenAt: source.state.backupTakenAt ?? null, ingredients: source.items(c.id, 'ingredient'), products: source.items(c.id, 'product') });
+    const { connectedLists } = source;
+    res.json({ company: { id: c.id, name: c.name, brand: c.brand ?? '', plant: c.plant ?? '' }, fee: visitFee(agency, c.id), listVersion: source.listVersion(c.id), group1Label: source.connection?.group1Label ?? 'Group 1', refreshedAt: source.state.refreshedAt ?? null, backupTakenAt: source.state.backupTakenAt ?? null, ...(connectedLists && { connectedLists }), ingredients: source.items(c.id, 'ingredient'), products: source.items(c.id, 'product') });
   }));
   app.post('/api/visits/reports', handler(false, async (req: any, res: any, u: any, agency: string) => {
     if (deps.staged()) return res.status(503).json({ error: 'Writes blocked' });

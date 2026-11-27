@@ -11,6 +11,7 @@ import { amountValue, feesRequest, getFees, leftLine, money, type CompanyFee, ty
 import { sourceRequest, type SourceConnection } from '../lib/sources';
 import { canEdit, canEditAirtableCompany, readAirtableCompany, updateAirtableCompany, uncertainCompanyEdit, type AirtableCompanyBaseline, providers, saveCompany } from '../lib/sourcesSetup';
 
+type CompanyBaseline = AirtableCompanyBaseline & { readOnlyFields?: string[] };
 type Company = { id: string; name: string; address?: string; type?: string; companyFee?: number; archived?: boolean };
 const contactRoles = ['Owner', 'Manager', 'Kitchen', 'Office'];
 const detailFields = [['name', 'Name'], ['address', 'Address'], ['type', 'Type']] as const;
@@ -80,7 +81,7 @@ export function CompanyScreen({ company, role, connection, yearlyCount, timeZone
 function AirtableCompanyDetails({ company, connection, onSaved }: {
   key?: string; company: Company; connection: SourceConnection; onSaved(name?: string): void;
 }) {
-  const [baseline, setBaseline] = useState<AirtableCompanyBaseline | null>(null);
+  const [baseline, setBaseline] = useState<CompanyBaseline | null>(null);
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [review, setReview] = useState<'uncertain' | 'stale' | null>(null);
   const [readOnly, setReadOnly] = useState(false);
@@ -99,7 +100,7 @@ function AirtableCompanyDetails({ company, connection, onSaved }: {
   }, [company.id]);
   const fields = { ...baseline?.fields, ...draft };
   const changed = Object.fromEntries(Object.entries<string>(draft).filter(([key, value]) => (value || null) !== baseline?.fields[key]));
-  const editable = baseline?.access === 'readwrite' && !readOnly;
+  const editable = baseline?.access === 'readwrite' && !readOnly && (!baseline.readOnlyFields || Object.keys(baseline.fields).some(field => !baseline.readOnlyFields!.includes(field)));
   const canSave = editable && !busy && !review && !!fields.name?.trim() && Object.keys(changed).length > 0;
   async function saveValues(from: AirtableCompanyBaseline, values: Record<string, string>) {
     const result = await updateAirtableCompany(company.id, from, values);
@@ -173,11 +174,12 @@ function AirtableCompanyDetails({ company, connection, onSaved }: {
     {baseline && <fieldset className="space-y-4" disabled={busy || readOnly || review === 'uncertain'}>
       {([...detailFields, ['brand', 'Brand'], ['plant', 'Plant']] as const).map(([field, label]) => mapping?.[field] && Object.hasOwn(baseline.fields, field) &&
         <label key={field} className="block space-y-2">{label}
-          {field === 'type' && baseline.typeOptions ? <select className={setupField} value={fields.type || ''}
+          {field === 'type' && baseline.typeOptions ? <select className={setupField} disabled={baseline.readOnlyFields?.includes(field)} value={fields.type || ''}
             onChange={event => changeField(field, event.target.value)}>
             <option value=""></option>{baseline.typeOptions.map(option => <option key={option}>{option}</option>)}
-          </select> : <input className={setupField} dir="auto" maxLength={2000} required={field === 'name'} value={fields[field] || ''}
+          </select> : <input className={setupField} dir="auto" maxLength={2000} readOnly={baseline.readOnlyFields?.includes(field)} required={field === 'name'} value={fields[field] || ''}
             onChange={event => changeField(field, event.target.value)} />}
+          {baseline.readOnlyFields?.includes(field) && <span className="text-sm text-ink-soft">Read only</span>}
           {Object.hasOwn(draft, field) && <span className="text-sm text-ink-soft">Original: {baseline.fields[field] || '—'}</span>}
         </label>)}
     </fieldset>}

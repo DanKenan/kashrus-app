@@ -16,7 +16,7 @@ import { sourceRequest, sourceStatus, type SourceConnection } from '../lib/sourc
 import { sourceButton } from './SourceConnectSheet';
 import { SourcesSheet } from './SourcesSheet';
 import { SheetRecordEditor, SheetRecordList, sheetSectionNames } from './SheetRecordEditor';
-import type { SourceSection } from '../lib/sourcePreview';
+import { airtableMappingCopy, type SourceSection } from '../lib/sourcePreview';
 import { SourceCompanyEditor } from './SourceCompanyEditor';
 import { canEdit, lastReadText, providers } from '../lib/sourcesSetup';
 import type { ReportSummary } from '../lib/inspectionVisit';
@@ -354,7 +354,7 @@ export function CompanyItemsSheet({ company, group1Label, onClose, isAdmin = tru
   group1Label: string; revision?: number; manageTargets?: Partial<Record<CompanyItemList, ItemEditorTarget | undefined>>;
   onClose(): void; onManage?(list: CompanyItemList, target: ItemEditorTarget): void;
 }) {
-  const [items, setItems] = useState<{ ingredients: FactoryItem[]; products: FactoryItem[] } | null>(null);
+  const [items, setItems] = useState<(Record<CompanyItemList, FactoryItem[]> & { connectedLists?: Record<CompanyItemList, boolean> }) | null>(null);
   const [list, setList] = useState<CompanyItemList>('ingredients');
   const [loadFailed, setLoadFailed] = useState(false);
   const [retry, setRetry] = useState(0);
@@ -414,7 +414,7 @@ export function CompanyItemsSheet({ company, group1Label, onClose, isAdmin = tru
   </div> : !items ? <div role="status" className="space-y-2">
     <p className="text-base text-ink-soft">Loading ingredients and products…</p>
     <div aria-hidden="true" className="h-16 rounded-lg border border-line bg-sunken" />
-  </div> : <>
+  </div> : items.connectedLists?.[list] === false ? <p className="text-base text-ink-soft">{airtableMappingCopy.missing(itemTabs[list])}</p> : <>
     {isAdmin && (target && onManage ? <button type="button" disabled={saving !== null} onClick={() => onManage(list, target)}
       className="flex min-h-12 w-full items-center justify-between gap-2 rounded-lg bg-gold-deep px-4 py-2 text-left text-base font-semibold text-paper hover:enabled:brightness-95 focus-visible:ring-2 focus-visible:ring-gold focus-visible:ring-offset-2 active:enabled:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-50 transition-transform duration-(--dur-fast) ease-shutfey">
       Manage {list}<ChevronRight aria-hidden="true" className="size-5 shrink-0" />
@@ -462,7 +462,7 @@ export function CompanyItemsSheet({ company, group1Label, onClose, isAdmin = tru
             ref={button => { tabButtons.current[key] = button; }} id={`${id}-${key}-tab`} aria-controls={`${id}-${key}`}
             aria-selected={list === key} tabIndex={list === key ? 0 : -1} onClick={() => selectList(key)} onKeyDown={tabKey}
             className="flex min-h-14 min-w-0 flex-wrap content-center items-center justify-center gap-x-1 rounded-t-lg border border-b-2 border-line-control border-b-transparent px-2 py-2 text-base font-semibold text-ink-soft hover:bg-paper focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-gold active:scale-[0.97] aria-selected:border-b-ink aria-selected:bg-sunken aria-selected:text-ink transition-[transform,background-color] duration-(--dur-fast) ease-shutfey">
-            {itemTabs[key]}{counts[key] !== undefined && <span className="text-sm font-medium text-ink-soft tnum">{`(${counts[key]})`}</span>}
+            {itemTabs[key]}{items?.connectedLists?.[key] !== false && counts[key] !== undefined && <span className="text-sm font-medium text-ink-soft tnum">{`(${counts[key]})`}</span>}
           </button>)}
         </div>
       </header>
