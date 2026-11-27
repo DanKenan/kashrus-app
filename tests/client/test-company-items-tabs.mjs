@@ -61,6 +61,36 @@ tabs(sheet)[0].el.props.onKeyDown({ key: 'ArrowRight', preventDefault() {} });
 await sheet.render();
 assert.equal(tabs(sheet)[1].el.props['aria-selected'], true);
 
+const markError = /Fixture Group 1 save failed/;
+let errorListReads = 0;
+globalThis.fetch = async (url, options) => {
+  if (options.method === 'PUT') {
+    assert.equal(url, '/api/sources/group1');
+    assert.deepEqual(JSON.parse(options.body), { kind: 'ingredient', itemId: 'recI0', group1: true });
+    return Response.json({ error: 'Fixture Group 1 save failed' }, { status: 503 });
+  }
+  assert.equal(url, '/api/factories/recFactory/items');
+  errorListReads++;
+  return Response.json(errorListReads === 1 ? visitItems : {
+    ...visitItems,
+    ingredients: [{ ...visitItems.ingredients[0], name: 'Refetched ingredient' }, ...visitItems.ingredients.slice(1)],
+  });
+};
+const markFailure = await mount(CompanyItemsSheet, props).render();
+await markFailure.click('Mark as Group 1');
+assert.match(markFailure.text(), markError);
+await markFailure.click('Products (26)');
+assert.doesNotMatch(markFailure.text(), markError, 'Switching tabs clears the save error');
+assert.equal(errorListReads, 1);
+
+await markFailure.click('Ingredients (29)');
+await markFailure.click('Mark as Group 1');
+assert.match(markFailure.text(), markError);
+await markFailure.render({ revision: 1 });
+assert.equal(errorListReads, 2);
+assert.match(markFailure.text(), /Refetched ingredient/);
+assert.doesNotMatch(markFailure.text(), markError, 'Refetching after a revision bump clears the save error');
+
 let failed = true;
 globalThis.fetch = async () => failed
   ? Response.json({ error: 'Fixture offline' }, { status: 503 })

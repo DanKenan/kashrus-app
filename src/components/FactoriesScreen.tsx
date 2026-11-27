@@ -371,6 +371,7 @@ export function CompanyItemsSheet({ company, group1Label, onClose, isAdmin = tru
   }, [list]);
   const selectList = (next: CompanyItemList) => {
     if (scroll.current) scrollPositions.current[list] = scroll.current.scrollTop;
+    setError('');
     setList(next);
   };
   const tabKey = (event: React.KeyboardEvent) => {
@@ -384,6 +385,7 @@ export function CompanyItemsSheet({ company, group1Label, onClose, isAdmin = tru
   useEffect(() => {
     let active = true;
     setLoadFailed(false);
+    setError('');
     const request = isAdmin ? sourceRequest(`/api/factories/${encodeURIComponent(company.id)}/items`) : visitRequest(`/api/visits/factories/${encodeURIComponent(company.id)}`);
     void request.then(result => { if (active) setItems(result); }).catch(() => { if (active) setLoadFailed(true); });
     return () => { active = false; };
