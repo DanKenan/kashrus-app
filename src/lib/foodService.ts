@@ -1,10 +1,11 @@
 import type { ScheduleCompany } from './visitSchedule';
 import type { StorageLike } from './inspectionVisit';
+export type PlaceKind = 'factory' | 'food_service';
 export type AnswerValue = boolean | number | string | null;
 export interface ChecklistItem { id: string; label: string; type: 'yes_no' | 'number' | 'text'; required: boolean; help: string; problemIf?: 'no' | 'yes'; min: number | null; max: number | null }
 export interface Template { id: string; name: string; items: ChecklistItem[]; version: number; updatedAt: string }
-export interface FoodPlace extends ScheduleCompany { address: string; source: 'connected' | 'manual'; type: string; templateId: string | null; templateName: string; assigned?: boolean; itemCount?: number }
-export interface FoodData { today: string; timeZone: string; templates: Template[]; places: FoodPlace[]; candidates: { id: string; name: string; type: string }[] }
+export interface FoodPlace extends ScheduleCompany { address: string; source: 'connected' | 'manual'; type: string; templateId: string | null; templateName: string; assigned?: boolean; itemCount?: number; typeMatched?: boolean }
+export interface FoodData { today: string; timeZone: string; templates: Template[]; places: FoodPlace[]; candidates: { id: string; name: string; type: string; typeMatched?: boolean }[] }
 export interface FoodAnswer { itemId: string; value: AnswerValue; note?: string; photo?: string }
 export interface FoodDraft { kind: 'food_service'; clientReportId: string; companyId: string; startedAt: string; templateId: string | null; templateVersion: number | null; answers: FoodAnswer[]; note: string; photo?: string }
 export interface ChecklistAnswer extends Omit<ChecklistItem, 'id'> { itemId: string; value: AnswerValue; note: string; failed: boolean; hasPhoto: boolean }

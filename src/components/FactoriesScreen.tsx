@@ -1,4 +1,5 @@
 import { ItemAgency, itemListEditor, type CompanyItemList } from './CompanyItemLists';
+import { PlaceKindFlip } from './PlaceKindFlip';
 import { CompanyScreen } from './CompanyScreen';
 import { CompanyRemovalSheet, companyRemovalRequest } from './CompanyInfoSheet';
 import { FeesAccountantSettings } from './FeesAccountantSettings';
@@ -226,6 +227,8 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
       </button>
       <div className="flex flex-wrap gap-2">
         <button type="button" className={sourceButton} onClick={() => setReportsOpen({ companyId: company.id, companyName: company.name })}>View visit reports</button>
+        {role === 'admin' && !company.archived && !company.removalPending && <PlaceKindFlip companyId={company.id} currentKind="factory"
+          onChanged={() => { setCompanies(rows => rows.filter(row => row.id !== company.id)); setReload(n => n + 1); setScheduleReload(n => n + 1); }} onError={setError} />}
         {!company.archived && (role === 'coordinator' || scheduleData?.companies.some(row => row.id === company.id)) && <button type="button" className={sourceButton} disabled={role === 'coordinator' && !scheduleData?.companies.some(row => row.id === company.id)} onClick={() => setEditing(company.id)}>Visit schedule</button>}
         {company.removalPending ? <button type="button" className={sourceButton} onClick={() => setRemoval(company)}>Continue permanent removal</button> :
           company.archived && <button type="button" className={sourceButton} disabled={restoring !== null} onClick={() => void restore(company)}>{restoring === company.id ? 'Saving…' : 'Restore company'}</button>}

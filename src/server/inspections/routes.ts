@@ -14,6 +14,7 @@ import { createScheduleStore } from './schedule-store.ts';
 import { validateSchedule, isDate, calendarDate, dueState, isMuted, alertDecision, type LastVisit, type Alert } from './schedule.ts';
 import { normalizeSubmit, buildReport, summary, type Fee } from './model.ts';
 import { createReportStore, reportId, type Cursor } from './store.ts';
+import type { Company } from '../sources/types.ts';
 import type { inspectionSourceAccessor } from '../sources/routes.ts';
 type Person = { id: string; name: string; role: string; agencyId?: string };
 export function registerInspectionRoutes(app: any, deps: {
@@ -103,13 +104,23 @@ export function registerInspectionRoutes(app: any, deps: {
   const inbox = createInboxStore({ ...deps, now, submittedAt: (a, id) => store.list(a).find(r => r.id === id)?.submittedAt });
   const reportSummary = (a: string, r: Parameters<typeof summary>[0]) => ({ ...summary(r), ...inbox.status(a, r) });
   const foodValues = (a: string) => deps.source(a).connection?.mapping?.companies?.foodServiceValues ?? [];
-  const factoryValues = (a: string) => deps.source(a).connection?.mapping?.companies?.factoryValues ?? [];
-  const others = (a: string) => deps.source(a).state.otherCompanies ?? [];
-  const kind = (a: string, c: { id: string; type?: string }) => classifyPlace(c, foodValues(a), food.doc(a).marked, food.doc(a).manualPlaces, factoryValues(a));
-  const markedOthers = (a: string) => others(a).filter(c => food.doc(a).marked.includes(c.id));
-  const connectedPlaces = (a: string) => [...deps.source(a).state.companies.filter(c => kind(a, c) === 'food_service').map(c => ({ ...c, address: ('address' in c ? c.address : '') || '', source: 'connected' as const })), ...markedOthers(a).map(c => ({ ...c, address: ('address' in c ? c.address : '') || '', source: 'connected' as const })), ...Object.entries(food.doc(a).manualPlaces).map(([id, c]) => ({ ...c, id, type: '', source: 'manual' as const }))];
+  const connectedCompanies = (a: string): Pick<Company, 'id' | 'name' | 'type' | 'address' | 'brand' | 'plant'>[] => {
+    const state = deps.source(a).state;
+    return [...state.companies, ...(state.otherCompanies ?? [])];
+  };
+  const kind = (a: string, c: { id: string; type?: string }) => {
+    const { marked, factoryMarked, manualPlaces } = food.doc(a);
+    return classifyPlace(c, foodValues(a), marked, manualPlaces, factoryMarked);
+  };
+  const manualCompanies = (a: string) => Object.entries(food.doc(a).manualPlaces)
+    .map(([id, c]) => ({ ...c, id, type: '', source: 'manual' as const }));
+  const connectedPlaces = (a: string) => [
+    ...connectedCompanies(a).filter(c => kind(a, c) === 'food_service')
+      .map(c => ({ ...c, address: c.address ?? '', source: 'connected' as const })),
+    ...manualCompanies(a),
+  ];
   const places = (a: string) => connectedPlaces(a).filter(c => active(a, c.id));
-  const allPlaces = (a: string) => [...deps.source(a).state.companies, ...markedOthers(a), ...Object.entries(food.doc(a).manualPlaces).map(([id, c]) => ({ ...c, id, type: '' }))].filter(c => active(a, c.id));
+  const allPlaces = (a: string) => [...connectedCompanies(a), ...manualCompanies(a)].filter(c => active(a, c.id));
   const templateFor = (a: string, id: string) => { const tid = Object.hasOwn(food.doc(a).placeTemplates, id) ? food.doc(a).placeTemplates[id] : null; return tid && Object.hasOwn(food.doc(a).templates, tid) ? food.doc(a).templates[tid] : null; };
   const zone = (a: string) => deps.timeZone?.(a) || 'America/New_York';
   const today = (a: string) => calendarDate(now().toISOString(), zone(a));
@@ -145,10 +156,11 @@ export function registerInspectionRoutes(app: any, deps: {
       marked: connected && food.doc(a).marked.includes(c.id), typeMatched: connected && typeMatched(c, foodValues(a)), templateId: template?.id ?? null, templateName: template?.name ?? '' };
   }
   const sortedPlaces = (a: string, u: Person) => places(a).filter(c => visible(a, c.id, u)).map(c => foodRow(a, c)).sort((a, b) => a.name.localeCompare(b.name));
-  const candidates = (a: string) => [...deps.source(a).state.companies.filter(c => kind(a, c) === 'factory'), ...others(a).filter(c => !food.doc(a).marked.includes(c.id))].filter(c => active(a, c.id)).map(c => ({ id: c.id, name: c.name, type: c.type ?? '' }));
+  const candidates = (a: string) => connectedCompanies(a).filter(c => kind(a, c) === 'factory' && active(a, c.id))
+    .map(c => ({ id: c.id, name: c.name, type: c.type ?? '', typeMatched: typeMatched(c, foodValues(a)) }));
   const templates = (a: string) => food.doc(a).templateOrder.map(id => food.doc(a).templates[id]);
   const placeFee = (a: string, id: string) => Object.hasOwn(fees.doc(a).places, id) ? fees.doc(a).places[id] : null;
-  const activeFactory = (a: string, id: string) => deps.source(a).state.companies.some(c =>
+  const activeFactory = (a: string, id: string) => connectedCompanies(a).some(c =>
     c.id === id && kind(a, c) === 'factory' && active(a, id));
   const canEditFactoryReportFee = (a: string, u: Person) =>
     u.role === 'admin' || fees.doc(a).settings.feeEditors === 'admins_and_coordinators';
@@ -477,24 +489,48 @@ export function registerInspectionRoutes(app: any, deps: {
     res.json({ ok: true });
   }));
   app.put?.('/api/food-service/marked', handler('only', async (req: any, res: any, u: Person, a: string) => {
-    strictFood(req.body, ['add', 'remove'], []);
+    const keys = ['add', 'remove', 'factoryAdd', 'factoryRemove'] as const;
+    strictFood(req.body, [...keys], []);
+    const changes = {} as Record<typeof keys[number], Set<string>>;
+    for (const key of keys) {
+      const ids = Object.hasOwn(req.body, key) ? req.body[key] : [];
+      if (!Array.isArray(ids) || ids.length > 2000 || !ids.every(id => typeof id === 'string')) invalidFood('Unknown connected company');
+      changes[key] = new Set(ids);
+    }
+    const { add, remove, factoryAdd, factoryRemove } = changes;
+    const explicitChoice = Object.hasOwn(req.body, 'factoryAdd') || Object.hasOwn(req.body, 'factoryRemove');
     await food.update(a, next => {
-      for (const k of ['add', 'remove']) {
-        const ids = req.body[k] ?? [];
-        if (!Array.isArray(ids) || ids.length > 2000 || !ids.every(id => typeof id === 'string')) invalidFood('Unknown connected company');
-        for (const id of ids) {
-          if (k === 'remove') {
-            if (next.marked.includes(id)) continue;
-            const connected = [...deps.source(a).state.companies, ...others(a)].find(c => c.id === id);
-            if (connected && typeMatched(connected, foodValues(a))) invalidFood('This place is food service because of its type in your connected list');
-            invalidFood('Unknown connected company');
-          }
-          if (!deps.source(a).state.companies.some(c => c.id === id) && !others(a).some(c => c.id === id)) invalidFood('Unknown connected company');
-        }
+      const companies = new Map(connectedCompanies(a).map(c => [c.id, c]));
+      const values = foodValues(a);
+      const marked = new Set(next.marked), factoryMarked = new Set(next.factoryMarked);
+      for (const id of [...add, ...remove, ...factoryAdd, ...factoryRemove]) {
+        if (!companies.has(id) || Object.hasOwn(next.manualPlaces, id)) invalidFood('Unknown connected company');
       }
-      next.marked = [...new Set([...next.marked, ...(req.body.add ?? [])])].filter(id => !(req.body.remove ?? []).includes(id));
-      if (next.marked.length > 2000) invalidFood('Too many marked places');
-    }); res.json({ places: sortedPlaces(a, u), candidates: candidates(a) });
+      for (const id of remove) {
+        if (!explicitChoice && !marked.has(id)) {
+          if (typeMatched(companies.get(id)!, values)) invalidFood('This place is food service because of its type in your connected list');
+          invalidFood('Unknown connected company');
+        }
+        marked.delete(id);
+      }
+      for (const id of factoryRemove) factoryMarked.delete(id);
+      for (const id of add) {
+        if (remove.has(id)) continue;
+        factoryMarked.delete(id);
+        if (!explicitChoice || !typeMatched(companies.get(id)!, values)) marked.add(id);
+        else marked.delete(id);
+      }
+      for (const id of factoryAdd) {
+        if (factoryRemove.has(id)) continue;
+        marked.delete(id);
+        if (typeMatched(companies.get(id)!, values)) factoryMarked.add(id);
+        else factoryMarked.delete(id);
+      }
+      if (marked.size > 2000 || factoryMarked.size > 2000) invalidFood('Too many marked places');
+      next.marked = [...marked];
+      next.factoryMarked = [...factoryMarked];
+    });
+    res.json({ places: sortedPlaces(a, u), candidates: candidates(a) });
   }));
   app.get('/api/visits/food-service', handler(false, (_req: any, res: any, u: Person, a: string) => {
     res.json({ places: sortedPlaces(a, u).map(p => ({ id: p.id, name: p.name, address: p.address, type: p.type, templateId: p.templateId, templateName: p.templateName, itemCount: templateFor(a, p.id)?.items.length ?? 0, assigned: assigned(a, p.id, u), nextDue: p.nextDue, status: p.status, overdueDays: p.overdueDays })).sort((a, b) => Number(b.assigned) - Number(a.assigned) || a.name.localeCompare(b.name)) });
@@ -507,10 +543,10 @@ export function registerInspectionRoutes(app: any, deps: {
   if (deps.testMode) app.post('/api/__test__/inspections/flush-seen', handler('only', async (_req: any, res: any) => { res.json({ writes: await inbox.flush() }); }));
   app.get('/api/visits/factories', handler(false, (_req: any, res: any, u: any, agency: string) => {
     const { state: s, connection: c } = deps.source(agency);
-    res.json({ group1Label: c?.group1Label ?? 'Group 1', refreshedAt: s.refreshedAt ?? null, backupTakenAt: s.backupTakenAt ?? null, companies: s.companies.filter(c => kind(agency, c) === 'factory' && active(agency, c.id) && visible(agency, c.id, u)).map(c => ({ ...dueState(schedules.company(agency, c.id).schedule, schedules.doc(agency).settings.countFrom, lastVisit(agency, c.id), today(agency), zone(agency)), assigned: assigned(agency, c.id, u), id: c.id, name: c.name, brand: c.brand ?? '', plant: c.plant ?? '', ingredientCount: s.itemsFor(c.id, 'ingredient').length, productCount: s.itemsFor(c.id, 'product').length })).sort((a, b) => Number(b.assigned) - Number(a.assigned) || a.name.localeCompare(b.name)) });
+    res.json({ group1Label: c?.group1Label ?? 'Group 1', refreshedAt: s.refreshedAt ?? null, backupTakenAt: s.backupTakenAt ?? null, companies: connectedCompanies(agency).filter(c => kind(agency, c) === 'factory' && active(agency, c.id) && visible(agency, c.id, u)).map(c => ({ ...dueState(schedules.company(agency, c.id).schedule, schedules.doc(agency).settings.countFrom, lastVisit(agency, c.id), today(agency), zone(agency)), assigned: assigned(agency, c.id, u), id: c.id, name: c.name, brand: c.brand ?? '', plant: c.plant ?? '', ingredientCount: s.itemsFor(c.id, 'ingredient').length, productCount: s.itemsFor(c.id, 'product').length })).sort((a, b) => Number(b.assigned) - Number(a.assigned) || a.name.localeCompare(b.name)) });
   }));
   app.get('/api/visits/factories/:companyId', handler(false, (req: any, res: any, u: any, agency: string) => {
-    const source = deps.source(agency), c = source.state.companies.find(c => c.id === req.params.companyId);
+    const source = deps.source(agency), c = connectedCompanies(agency).find(c => c.id === req.params.companyId);
     if (!c || kind(agency, c) !== 'factory' || !active(agency, c.id) || !visible(agency, c.id, u)) return res.status(404).json({ error: 'Company not found' });
     const { connectedLists } = source;
     res.json({ company: { id: c.id, name: c.name, brand: c.brand ?? '', plant: c.plant ?? '' }, fee: visitFee(agency, c.id), listVersion: source.listVersion(c.id), group1Label: source.connection?.group1Label ?? 'Group 1', refreshedAt: source.state.refreshedAt ?? null, backupTakenAt: source.state.backupTakenAt ?? null, ...(connectedLists && { connectedLists }), ingredients: source.items(c.id, 'ingredient'), products: source.items(c.id, 'product') });
@@ -573,7 +609,7 @@ export function registerInspectionRoutes(app: any, deps: {
   app.get('/api/visits/reports/mine', handler(false, (req: any, res: any, u: any, agency: string) => list(req, res, agency, u.id, u), true));
   app.get('/api/inspections/reports', handler(true, (req: any, res: any, u: any, agency: string) => list(req, res, agency, undefined, u), true));
   app.get('/api/inspections/reports/filters', handler(true, (_req: any, res: any, u: Person, a: string) => {
-    const factories = deps.source(a).state.companies.filter(c => kind(a, c) === 'factory' && !removal(a, c.id)?.deletedAt);
+    const factories = connectedCompanies(a).filter(c => kind(a, c) === 'factory' && !removal(a, c.id)?.deletedAt);
     const visibleCompanies = [...factories, ...places(a)].filter(c => visible(a, c.id, u));
     const rows = store.list(a).filter(r => visible(a, r.companyId, u));
     const options = new Map(visibleCompanies.map(c => [c.id, { id: c.id, name: c.name }]));

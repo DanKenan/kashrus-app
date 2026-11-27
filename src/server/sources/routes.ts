@@ -137,6 +137,13 @@ function pilotMapping(input: any): SourceMapping {
   const mapping = { ...structuredClone(emptyMapping), version: 2 as const, entities, relationships, group1Values: input.group1Values };
   for (const entity of entities) Object.assign(mapping[entitySections[entity.kind as keyof typeof entitySections]],
     { table: entity.tableId }, Object.fromEntries(Object.entries(entity.fields).map(([name, f]) => [name, f.fieldId])));
+  for (const key of ['factoryValues', 'foodServiceValues'] as const) {
+    const values = input.companies?.[key];
+    if (values === undefined) continue;
+    if (!Array.isArray(values) || values.length > 50 ||
+        !values.every((value: unknown) => typeof value === 'string' && value.length <= 200)) invalid();
+    mapping.companies[key] = values;
+  }
   return mapping;
 }
 
@@ -1407,7 +1414,7 @@ export function registerSourceRoutes(app: any, deps: {
     if (source && deps.companyRemoval) await deps.companyRemoval.pendingRemovals(id, source);
     const state = cache.state(id);
     if ((source && deps.companyRemoval?.removal(id, req.params.companyId, source)?.deletedAt) ||
-        !state.companies.some(c => c.id === req.params.companyId)) return res.status(404).json({ error: 'Company not found' });
+        ![...state.companies, ...(state.otherCompanies ?? [])].some(c => c.id === req.params.companyId)) return res.status(404).json({ error: 'Company not found' });
     const connectedLists = connectedItemLists(connections.get(id), state);
     res.json({ ...(connectedLists && { connectedLists }),
       ingredients: items(id, req.params.companyId, 'ingredient'), products: items(id, req.params.companyId, 'product') });
@@ -1631,7 +1638,8 @@ export function registerSourceRoutes(app: any, deps: {
     const foodServiceIds = new Set(await deps.foodServiceCompanyIds?.(id) ?? []);
     const source = companySourceIdentity(c), lifecycle = deps.companyRemoval;
     const pending = source ? await lifecycle?.pendingRemovals(id, source) ?? [] : [];
-    const rows = s.companies.filter(c => !foodServiceIds.has(c.id)).flatMap(company => {
+    const companies: (Pick<Company, 'id' | 'name'> & Partial<Company>)[] = [...s.companies, ...(s.otherCompanies ?? [])];
+    const rows = companies.filter(c => !foodServiceIds.has(c.id)).flatMap(company => {
       const entry = source ? lifecycle?.removal(id, company.id, source, company.archiveKey) : undefined;
       if (entry?.deletedAt) return [];
       return [{
