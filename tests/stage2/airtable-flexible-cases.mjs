@@ -131,7 +131,9 @@ export async function flexibleMappingCases(baseUrl, ctx) {
     assert.equal(preview.connected.contact, false);
     assert.equal(preview.fields.company.name, 'Read only');
     assert.equal(preview.fields.company.address, 'Ready');
-    assert.match(preview.issues[0].message, /wrong type for Plant/);
+    const plantWarning = preview.issues.find(i => i.entity === 'company' && i.field === 'plant');
+    assert.match(plantWarning.message, /wrong type for Plant/);
+    assert.equal(plantWarning.blocking, false);
     const overlapping = structuredClone(pilotMapping);
     overlapping.entities[2].filter.values = ['Ingredient'];
     await call('PUT', '/api/sources/connection', { ...config, mapping: overlapping }, 400);
@@ -141,11 +143,26 @@ export async function flexibleMappingCases(baseUrl, ctx) {
     const mismatch = await call('POST', '/api/sources/airtable-mapping/preview', { ...config, mapping: wrongTarget });
     assert.equal(mismatch.connected.ingredient, false);
     assert.match(mismatch.issues.find(i => i.entity === 'ingredient').message, /points to a different Airtable table/);
+    const rejected = await call('PUT', '/api/sources/connection', { ...config, mapping: wrongTarget }, 400);
+    assert.match(rejected.error, /points to a different Airtable table/);
+    assert.equal(rejected.issues.find(i => i.entity === 'ingredient' && i.field === 'relationship').blocking, true);
     mock.schema[1].fields.find(f => f.id === 'fldOwners').options.linkedTableId = 'tblFacilities';
+    const wrongType = structuredClone(wrongTarget);
+    wrongType.relationships[0].fieldId = 'fldTextCompany';
+    const rejectedType = await call('PUT', '/api/sources/connection', { ...config, mapping: wrongType }, 400);
+    assert.equal(rejectedType.issues.find(i => i.entity === 'ingredient' && i.field === 'relationship').blocking, true);
     mock.state.scopes = ['data.records:read', 'schema.bases:read'];
     const readOnly = await call('POST', '/api/sources/airtable-mapping/preview', { ...config, mapping: pilotMapping });
     assert.equal(readOnly.relationships.ingredient, 'Read only');
     mock.state.scopes.push('data.records:write');
+    const withoutProductRelationship = { ...pilotMapping, relationships: pilotMapping.relationships.filter(r => r.fromEntity !== 'product') };
+    await save(withoutProductRelationship);
+    for (const path of ['/api/sources/companies/recCedar/items', '/api/factories/recCedar/items', '/api/visits/factories/recCedar']) {
+      const items = await call('GET', path);
+      assert.deepEqual(items.connectedLists, { ingredients: true, products: false, contacts: false });
+      assert.deepEqual(items.ingredients.map(row => row.name), ['Rolled oats']);
+      assert.deepEqual(items.products, []);
+    }
     const saved = await save(pilotMapping);
     assert.deepEqual(saved.counts, { companies: 3, ingredients: 3, products: 2 });
     const list = await call('GET', '/api/sources/companies/recCedar/items');

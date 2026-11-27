@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import { mount } from './lib/mini-render.mjs';
 import { FlexibleAirtableWizard } from '../../src/components/SourceConnectSheet.tsx';
 import { CompanyItemLists, RelationshipEditor } from '../../src/components/CompanyItemLists.tsx';
+import { CompanyItemsSheet } from '../../src/components/FactoriesScreen.tsx';
 import { pilotMapping, pilotSchema } from '../stage2/airtable-flexible-cases.mjs';
 
 const original = globalThis.fetch;
+const originalDocument = globalThis.document;
 const calls = [];
 const reply = (value, status = 200) => new Response(JSON.stringify(value), { status });
 const select = async (form, current, value, index = 0) => {
@@ -83,5 +85,41 @@ try {
   assert.equal(calls.at(-1)[2].operation, 'assign');
   assert.notEqual(calls.at(-1)[2].operationId, token);
   assert.equal(saved, 2);
-} finally { globalThis.fetch = original; }
+
+  const companyItemsPath = '/api/sources/companies/recCedar/items';
+  const factoryItemsPath = '/api/factories/recCedar/items';
+  const visitItemsPath = '/api/visits/factories/recCedar';
+  const items = { connectedLists: { ingredients: true, products: false, contacts: false },
+    ingredients: [{ id: 'recOats', name: 'Rolled oats' }], products: [] };
+  globalThis.fetch = async url => {
+    if (url === companyItemsPath) return reply({ ...items, sourceType: 'airtable', access: 'readwrite', status: 'ok', flexibleMapping: true });
+    assert.ok([factoryItemsPath, visitItemsPath].includes(url), String(url));
+    return reply(items);
+  };
+  const missingProducts = /Products are not connected for this agency\./;
+  const emptyProducts = /No products listed for this company\./;
+  const lists = await mount(CompanyItemLists, { companyId: 'recCedar', role: 'admin', revision: 0, onSaved() {} }).render();
+  assert.match(lists.text(), missingProducts);
+  assert.doesNotMatch(lists.text(), emptyProducts);
+  assert.equal(button(lists, 'View products'), undefined);
+  await lists.click('View ingredients');
+  assert.match(lists.text(), /Rolled oats/);
+
+  globalThis.document = { activeElement: null, addEventListener() {}, removeEventListener() {} };
+  for (const isAdmin of [true, false]) {
+    const sheet = await mount(CompanyItemsSheet, { company: { id: 'recCedar', name: 'Cedar Milling' },
+      group1Label: 'Group 1', isAdmin, onClose() {} }).render();
+    assert.match(sheet.text(), /Rolled oats/);
+    assert.equal(!!button(sheet, 'Mark as Group 1'), isAdmin);
+    await sheet.click('Products');
+    assert.match(sheet.text(), missingProducts);
+    assert.doesNotMatch(sheet.text(), emptyProducts);
+    await sheet.click('Ingredients');
+    assert.match(sheet.text(), /Rolled oats/);
+  }
+} finally {
+  globalThis.fetch = original;
+  if (originalDocument === undefined) delete globalThis.document;
+  else globalThis.document = originalDocument;
+}
 console.log('Flexible Airtable wizard, optional lists, role gates, stale review and assignment passed.');

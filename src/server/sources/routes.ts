@@ -11,7 +11,7 @@ import { fail, guardSourceWrite, recordIdPattern, serializeItemFields, type Airt
 import { CompanyLinkError, mapSourceLists, companyLinkResolver, describeAirtableMapping, entitySections, linkIds, mappingFields, rowMatchesEntity } from './mapping.ts';
 import { airtableMappingCopy, summarizeValues, customFieldTypes, isMappedCustomField, type SourceSection } from '../../lib/sourcePreview.ts';
 import { createConnector, type SourceSettings } from './stubs.ts';
-import { createSourceCache, nextNightlyRun } from './cache.ts';
+import { createSourceCache, nextNightlyRun, type SourceState } from './cache.ts';
 import { encryptKey, decryptKey, keyHint } from './crypto.ts';
 import { guessMapping } from './mapping.ts';
 import { normalizeConnection, createSourceStore, type AirtableEditLedgerEntry, type Connection } from './store.ts';
@@ -144,6 +144,16 @@ function companySourceIdentity(c: Connection | undefined) {
   if (!c?.mapping.companies?.table) return undefined;
   const { file, table } = c.mapping.companies;
   return createHash('sha256').update(JSON.stringify([c.sourceType, file?.id || c.baseId, table])).digest('base64url');
+}
+
+function connectedItemLists(connection: Connection | undefined, state: SourceState) {
+  if (connection?.sourceType !== 'airtable' || connection.mapping.version !== 2) return undefined;
+  const configured = (kind: 'ingredient' | 'product') => {
+    const entity = connection.mapping.entities?.find(e => e.kind === kind);
+    const relation = connection.mapping.relationships?.find(r => r.fromEntity === entity?.id);
+    return state.connectedLists?.[kind] ?? !!(entity && relation);
+  };
+  return { ingredients: configured('ingredient'), products: configured('product'), contacts: false };
 }
 
 type LinkCompany = Pick<Company, 'id' | 'sourceKey' | 'name'>;
@@ -1139,13 +1149,8 @@ export function registerSourceRoutes(app: any, deps: {
       res.json = (body: any) => {
         if (!Array.isArray(body?.ingredients)) return send(body);
         const state = cache.state(user.agencyId);
-        const configured = (kind: 'ingredient' | 'product') => {
-          const entity = connection.mapping.entities?.find(e => e.kind === kind);
-          const relation = connection.mapping.relationships?.find(r => entity && r.fromEntity === entity.id);
-          return state.connectedLists?.[kind] ?? !!(entity && relation);
-        };
         return send({ ...body, flexibleMapping: true,
-          connectedLists: { ingredients: configured('ingredient'), products: configured('product'), contacts: false },
+          connectedLists: connectedItemLists(connection, state),
           ...(user.role === 'admin' && { mappingIssues: state.mappingIssues, mappingWrites: {
             ingredients: state.relationshipWrites?.ingredient === true, products: state.relationshipWrites?.product === true,
           } }) });
@@ -1400,9 +1405,12 @@ export function registerSourceRoutes(app: any, deps: {
   app.get('/api/factories/:companyId/items', handler(async (req: any, res: any, { id }: any) => {
     const source = companySourceIdentity(connections.get(id));
     if (source && deps.companyRemoval) await deps.companyRemoval.pendingRemovals(id, source);
+    const state = cache.state(id);
     if ((source && deps.companyRemoval?.removal(id, req.params.companyId, source)?.deletedAt) ||
-        !cache.state(id).companies.some(c => c.id === req.params.companyId)) return res.status(404).json({ error: 'Company not found' });
-    res.json({ ingredients: items(id, req.params.companyId, 'ingredient'), products: items(id, req.params.companyId, 'product') });
+        !state.companies.some(c => c.id === req.params.companyId)) return res.status(404).json({ error: 'Company not found' });
+    const connectedLists = connectedItemLists(connections.get(id), state);
+    res.json({ ...(connectedLists && { connectedLists }),
+      ingredients: items(id, req.params.companyId, 'ingredient'), products: items(id, req.params.companyId, 'product') });
   }));
   app.put('/api/sources/group1', mutation(async (req: any, res: any, { id, user }: any) => {
     const { kind, itemId, group1 } = req.body || {};
@@ -1723,6 +1731,7 @@ export function inspectionSourceAccessor(cache: ReturnType<typeof createSourceCa
     const connection = connections.get(agencyId), state = cache.state(agencyId);
     return {
       state, identity: companySourceIdentity(connection), connection: connection ? {...connection, fees:{...connection.fees,mashgiach:{...connection.fees?.mashgiach,...Object.fromEntries(state.companies.filter(c=>c.mashgiachFee!==undefined).map(c=>[c.id,{amount:c.mashgiachFee!,currency:'USD'}]))}}} : undefined,
+      connectedLists: connectedItemLists(connection, state),
       listVersion: (companyId: string) => connection?.backupHashes?.[companyId] || '',
       items: (companyId: string, kind: 'ingredient' | 'product') => state.itemsFor(companyId, kind).map(item => ({
         id: item.id, name: item.name, brand: item.brand ?? '', code: 'code' in item ? item.code ?? '' : '',

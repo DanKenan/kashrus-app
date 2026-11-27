@@ -384,11 +384,11 @@ export function validateAirtableMapping(mapping: SourceMapping, tables: Airtable
     const field = owner.table.fields.find(f => f.id === relationship.fieldId);
     if (!field || relationship.ownership !== (reverse ? 'to' : 'from') ||
         !(linked ? field.type === 'multipleRecordLinks' : relationship.kind === 'text-reference' && compatibleField('name', field))) {
-      report(entry, airtableMappingCopy.schemaChanged, 'relationship');
+      report(entry, airtableMappingCopy.schemaChanged, 'relationship', true);
       continue;
     }
     if (linked && field.options?.linkedTableId !== (reverse ? from : company).table.id) {
-      report(entry, airtableMappingCopy.wrongTable, 'relationship');
+      report(entry, airtableMappingCopy.wrongTable, 'relationship', true);
       continue;
     }
     // Airtable's single-record UI preference is useful only as a fail-closed constraint.
