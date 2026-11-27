@@ -26,7 +26,7 @@ try {
   assert.match(form.text(), /Values that mean Basic ingredients/);
   const sheet = mount(CompanyItemsSheet, { company: { id: 'c', name: 'Factory' }, group1Label: 'Group 1', onClose() {} });
   await sheet.render();
-  assert.match(sheet.text(), /Factory — ingredients/);
+  assert.match(sheet.text(), /Factory — items/);
   assert.match(sheet.text(), /OU-DE/);
   assert.ok(sheet.html().includes('text-xs text-ink-soft">DE</span>')); // Render the shared chip component.
   assert.doesNotMatch(sheet.text(), /Dairy_equipment/);

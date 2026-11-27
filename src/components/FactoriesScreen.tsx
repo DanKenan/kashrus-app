@@ -1,16 +1,16 @@
-import { ItemAgency } from './CompanyItemLists';
+import { ItemAgency, itemListEditor, type CompanyItemList } from './CompanyItemLists';
 import { CompanyScreen } from './CompanyScreen';
 import { CompanyRemovalSheet, companyRemovalRequest } from './CompanyInfoSheet';
 import { FeesAccountantSettings } from './FeesAccountantSettings';
 import { PayScreen } from './PayScreen';
 import { yearlyVisits } from '../lib/fees';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { FactoryItemChip } from './FactoryItemChip';
 import { InspectionReportDetail, InspectionReportsInbox } from './InspectionReportsInbox';
 import { VisitScheduleEditor } from './VisitScheduleEditor';
-import { VisitSheet, visitRequest, visitTime } from './FactoryVisitScreen';
+import { useVisitFocus, VisitSheet, visitRequest, visitTime } from './FactoryVisitScreen';
 import { calendarDate, displayDate, overdueDaysText, type ScheduleData, type ScheduleCompany } from '../lib/visitSchedule';
-import { Plus, X } from 'lucide-react';
+import { ChevronRight, Plus, X } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import { sourceRequest, sourceStatus, type SourceConnection } from '../lib/sources';
 import { sourceButton } from './SourceConnectSheet';
@@ -48,6 +48,8 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
   const [companies, setCompanies] = useState<Factory[]>([]);
   const sheetSections = role === 'admin' && connection?.sourceType === 'google_sheets' ? connection.sheetsEditSections : undefined;
   const [selectedCompany, setSelectedCompany] = useState<Factory | null>(null);
+  const [initialItemList, setInitialItemList] = useState<CompanyItemList>();
+  const [itemsRevision, setItemsRevision] = useState(0);
   const [reportsOpen, setReportsOpen] = useState<{ companyId?: string; companyName?: string } | null>(null);
   const [reportDetail, setReportDetail] = useState<string | null>(null);
   const [recentReports, setRecentReports] = useState<ReportSummary[] | null>(null);
@@ -86,7 +88,7 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
   const generation = useRef(0);
   useEffect(() => {
     const request = ++generation.current;
-    if (!isOpen) { setSettings(false); setReportsOpen(null); setReportDetail(null); setRemoval(null); setArchived(false); setCompanyChange(''); setAddHelp(false); setCompanyEditor(false); setCompanyScreen(null); setFeesSettings(false); setPayOpen(false); setSelectedCompany(null); setSheetList(null); setSheetRecord(null); return; }
+    if (!isOpen) { setSettings(false); setReportsOpen(null); setReportDetail(null); setRemoval(null); setArchived(false); setCompanyChange(''); setAddHelp(false); setCompanyEditor(false); setCompanyScreen(null); setFeesSettings(false); setPayOpen(false); setSelectedCompany(null); setInitialItemList(undefined); setSheetList(null); setSheetRecord(null); return; }
     let timer: ReturnType<typeof setTimeout> | undefined;
     let polls = 0;
     const schedule = (current: SourceConnection) => {
@@ -277,11 +279,25 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
         : 'Connect a source that supports adding companies and enable write access in Source settings.'}</p>
       <button type="button" className={sourceButton} disabled={!connection} onClick={() => { setAddHelp(false); setSettings(true); }}>Open source settings</button>
     </VisitSheet>}
+    {selectedCompany && <CompanyItemsSheet key={selectedCompany.id} isAdmin={role === 'admin'} company={selectedCompany}
+      group1Label={role === 'admin' ? connection?.group1Label || 'Group 1' : visitGroup1Label} revision={itemsRevision}
+      manageTargets={selectedCompany.archived ? undefined : {
+        ingredients: itemListEditor(role, connection, 'ingredients'), products: itemListEditor(role, connection, 'products'),
+      }}
+      onManage={(list, target) => {
+        if (target === 'sheet') setSheetList(list);
+        else { setInitialItemList(list); setCompanyScreen(selectedCompany); }
+      }} onClose={() => setSelectedCompany(null)} />}
     {companyScreen && <CompanyScreen key={`${role}:${companyScreen.id}`} company={companyScreen} timeZone={timeZone} role={role} connection={connection}
       yearlyCount={yearlyVisits(scheduleData?.companies.find(c => c.id === companyScreen.id)?.schedule, scheduleData?.today.slice(0, 4) || '')}
-      onClose={() => setCompanyScreen(null)}
+      initialItemList={initialItemList}
+      onClose={() => {
+        setCompanyScreen(null);
+        setInitialItemList(undefined);
+        if (initialItemList) setItemsRevision(k => k + 1);
+      }}
       onSourceSaved={() => { setReload(k => k + 1); setScheduleReload(k => k + 1); }}
-      onRemove={role === 'admin' && connection?.companySource ? (name) => setRemoval({ ...companyScreen, name }) : undefined} />}
+      onRemove={!initialItemList && role === 'admin' && connection?.companySource ? (name) => setRemoval({ ...companyScreen, name }) : undefined} />}
     {removal && connection?.companySource && <CompanyRemovalSheet company={removal} source={connection.companySource}
       sourceName={providers.find(p => p.id === connection.sourceType)?.name ?? 'Connected source'}
       onClose={() => setRemoval(null)} onChanged={companyChanged} onPending={() => { setCompanyScreen(null); setReload(k => k + 1); setScheduleReload(k => k + 1); }} />}
@@ -293,10 +309,12 @@ export function FactoriesScreen({ isOpen: requestedOpen, onClose: requestedClose
       initialCompanyName={reportsOpen.companyName} onClose={() => { setReportsOpen(null); setReportsReload(k => k + 1); }} />}
     {reportDetail && <InspectionReportDetail key={reportDetail} id={reportDetail} timeZone={timeZone} onClose={() => setReportDetail(null)}
       onUpdated={report => setRecentReports(rows => rows?.map(row => row.id === report.id ? report : row) ?? null)} />}
-    {selectedCompany && <CompanyItemsSheet isAdmin={role === 'admin'} company={selectedCompany} group1Label={role === 'admin' ? connection?.group1Label || 'Group 1' : visitGroup1Label} onClose={() => setSelectedCompany(null)} />}
     {canEdit(role, connection) && companyEditor && <SourceCompanyEditor company={{ name: '' }} source={providers.find(p => p.id === connection?.sourceType)?.name || ''} onClose={() => setCompanyEditor(false)} onSaved={() => { setReload(k => k + 1); setScheduleReload(k => k + 1); }} />}
     {sheetList && sheetSections?.includes(sheetList) && !sheetRecord &&
-      <SheetRecordList section={sheetList} onClose={() => setSheetList(null)}
+      <SheetRecordList section={sheetList} onClose={() => {
+        setSheetList(null);
+        if (selectedCompany) setItemsRevision(k => k + 1);
+      }}
         onChoose={row => setSheetRecord({ section: sheetList, row })}
         onAdd={() => setSheetRecord({ section: sheetList })} />}
     {sheetRecord && sheetSections?.includes(sheetRecord.section) &&
@@ -329,35 +347,47 @@ function companyVisitDates(company: Factory, data: ScheduleData | null, coordina
 }
 
 interface FactoryItem { certificationRaw?: string; statusRaw?: string; agencyRaw?: string; confidence?: number; id: string; name: string; agency: string; dpm: string | null; group1: boolean; group1Source: 'source' | 'admin' }
-export function CompanyItemsSheet({ company, group1Label, onClose, isAdmin = true }: { isAdmin?: boolean; company: Pick<Factory, 'id' | 'name'>; group1Label: string; onClose(): void }) {
+const itemTabs = { ingredients: 'Ingredients', products: 'Products' } as const;
+type ItemEditorTarget = NonNullable<ReturnType<typeof itemListEditor>>;
+export function CompanyItemsSheet({ company, group1Label, onClose, isAdmin = true, revision = 0, manageTargets, onManage }: {
+  key?: string; isAdmin?: boolean; company: Pick<Factory, 'id' | 'name'> & Partial<Pick<Factory, 'ingredientCount' | 'productCount'>>;
+  group1Label: string; revision?: number; manageTargets?: Partial<Record<CompanyItemList, ItemEditorTarget | undefined>>;
+  onClose(): void; onManage?(list: CompanyItemList, target: ItemEditorTarget): void;
+}) {
   const [items, setItems] = useState<{ ingredients: FactoryItem[]; products: FactoryItem[] } | null>(null);
+  const [list, setList] = useState<CompanyItemList>('ingredients');
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [retry, setRetry] = useState(0);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState<string | null>(null);
   const lock = useRef(false);
-  const root = useRef<HTMLDivElement>(null);
+  const root = useVisitFocus(onClose);
+  const id = useId();
+  const scroll = useRef<HTMLDivElement>(null);
+  const scrollPositions = useRef({ ingredients: 0, products: 0 });
+  const tabButtons = useRef<Partial<Record<CompanyItemList, HTMLButtonElement | null>>>({});
+  useLayoutEffect(() => {
+    if (scroll.current) scroll.current.scrollTop = scrollPositions.current[list];
+  }, [list]);
+  const selectList = (next: CompanyItemList) => {
+    if (scroll.current) scrollPositions.current[list] = scroll.current.scrollTop;
+    setList(next);
+  };
+  const tabKey = (event: React.KeyboardEvent) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    const next = event.key === 'Home' ? 'ingredients' : event.key === 'End' ? 'products'
+      : list === 'ingredients' ? 'products' : 'ingredients';
+    event.preventDefault();
+    selectList(next);
+    tabButtons.current[next]?.focus();
+  };
   useEffect(() => {
     let active = true;
-    setItems(null); setError('');
+    setLoadFailed(false);
     const request = isAdmin ? sourceRequest(`/api/factories/${encodeURIComponent(company.id)}/items`) : visitRequest(`/api/visits/factories/${encodeURIComponent(company.id)}`);
-    void request.then(result => { if (active) setItems(result); }).catch(e => { if (active) setError(e.message); });
+    void request.then(result => { if (active) setItems(result); }).catch(() => { if (active) setLoadFailed(true); });
     return () => { active = false; };
-  }, [company.id, isAdmin]);
-  useEffect(() => {
-    const previous = document.activeElement as HTMLElement | null;
-    const controls = () => Array.from<HTMLButtonElement>(root.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') || []);
-    controls()[0]?.focus();
-    const key = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(); }
-      if (event.key === 'Tab') {
-        const buttons = controls(), first = buttons[0], last = buttons[buttons.length - 1];
-        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
-        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
-      }
-    };
-    const focus = (event: FocusEvent) => { if (!root.current?.contains(event.target as Node)) controls()[0]?.focus(); };
-    document.addEventListener('keydown', key, true); document.addEventListener('focusin', focus);
-    return () => { document.removeEventListener('keydown', key, true); document.removeEventListener('focusin', focus); previous?.focus(); };
-  }, []);
+  }, [company.id, isAdmin, revision, retry]);
   const mark = async (kind: 'ingredient' | 'product', item: FactoryItem, group1: boolean | null) => {
     if (!isAdmin || lock.current) return;
     lock.current = true; setSaving(`${kind}:${item.id}`); setError('');
@@ -368,14 +398,78 @@ export function CompanyItemsSheet({ company, group1Label, onClose, isAdmin = tru
     } catch (e) { setError(e instanceof Error ? e.message : "Couldn't save. Try again."); }
     finally { lock.current = false; setSaving(null); }
   };
+  const counts = { ingredients: items?.ingredients.length ?? company.ingredientCount, products: items?.products.length ?? company.productCount };
+  const target = isAdmin ? manageTargets?.[list] : undefined;
+  const title = `${company.name} — items`;
+  const kind = list === 'ingredients' ? 'ingredient' : 'product';
+  const panel = loadFailed ? <div className="space-y-2">
+    <p role="alert" className="text-base text-bad">Couldn't load the item lists. Try again.</p>
+    <button type="button" className={sourceButton} onClick={() => {
+      tabButtons.current[list]?.focus();
+      setItems(null);
+      setRetry(k => k + 1);
+    }}>Try again</button>
+  </div> : !items ? <div role="status" className="space-y-2">
+    <p className="text-base text-ink-soft">Loading ingredients and products…</p>
+    <div aria-hidden="true" className="h-16 rounded-lg border border-line bg-sunken" />
+  </div> : <>
+    {isAdmin && (target && onManage ? <button type="button" disabled={saving !== null} onClick={() => onManage(list, target)}
+      className="flex min-h-12 w-full items-center justify-between gap-2 rounded-lg bg-gold-deep px-4 py-2 text-left text-base font-semibold text-paper hover:enabled:brightness-95 focus-visible:ring-2 focus-visible:ring-gold focus-visible:ring-offset-2 active:enabled:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-50 transition-transform duration-(--dur-fast) ease-shutfey">
+      Manage {list}<ChevronRight aria-hidden="true" className="size-5 shrink-0" />
+    </button> : <p className="text-sm text-ink-soft">Editing is unavailable for this source.</p>)}
+    {!items[list].length ? <p className="text-base text-ink-soft">No {list} listed for this company.</p> : <ul className="space-y-2">
+      {items[list].map(item => {
+        const dpm = item.dpm === 'dairy_equipment' ? 'DE' : item.dpm && item.dpm[0].toUpperCase() + item.dpm.slice(1);
+        const chips = [dpm, item.confidence !== undefined && item.confidence < 0.8 ? 'Check' : ''].filter(Boolean);
+        return <li key={item.id} className="space-y-2 rounded-lg border border-line p-4">
+          <p dir="auto" className="break-words text-base">{item.name}</p>
+          <div className="space-y-2">
+            <ItemAgency agency={item.agency} />
+            {item.certificationRaw && item.certificationRaw.trim() !== item.agency?.trim() && <p className="break-words text-base">{item.certificationRaw}</p>}
+            {item.statusRaw && <p className="break-words text-base">{item.statusRaw}</p>}
+            <div className="flex flex-wrap gap-2">{chips.map(chip => <FactoryItemChip key={chip}>{chip}</FactoryItemChip>)}</div>
+          </div>
+          <p className="text-base">{group1Label}: {item.group1 ? 'Yes' : '—'} {item.group1Source === 'admin' && '(set by admin)'}</p>
+          {isAdmin && <div className="flex flex-wrap gap-2">
+            <button type="button" className={sourceButton} disabled={saving !== null} onClick={() => void mark(kind, item, !item.group1)}>
+              {saving === `${kind}:${item.id}` ? 'Saving…' : item.group1 ? `Remove ${group1Label}` : `Mark as ${group1Label}`}
+            </button>
+            {item.group1Source === 'admin' && <button type="button" className={sourceButton} disabled={saving !== null}
+              onClick={() => void mark(kind, item, null)}>Use source value</button>}
+          </div>}
+        </li>;
+      })}
+    </ul>}
+  </>;
+
   return <div className="fixed inset-0 z-50 flex items-end justify-center bg-scrim">
-    <div ref={root} role="dialog" aria-modal="true" aria-label={`${company.name} — ingredients`} className="max-h-[90dvh] w-full max-w-2xl space-y-4 overflow-y-auto rounded-t-2xl bg-surface p-4 text-ink tactile-4">
-      <div className="flex items-center gap-4"><h2 dir="auto" className="min-w-0 flex-1 break-words text-2xl font-semibold">{company.name} — ingredients</h2><button type="button" aria-label="Close" className={`${sourceButton} w-11 px-0`} onClick={onClose}><X aria-hidden="true" className="mx-auto h-5 w-5" /></button></div>
-      {error && <p role="alert" className="text-base text-bad">{error}</p>}
-      {!items ? <p role="status" className="text-base text-ink-soft">Loading ingredients…</p> : (['ingredients', 'products'] as const).map(key => <section key={key} className="space-y-2"><h3 className="text-xl font-semibold">{key === 'ingredients' ? 'Ingredients' : 'Products'}</h3>{!items[key].length && <p className="text-base text-ink-soft">{key === 'ingredients' ? 'No ingredients.' : 'No products.'}</p>}<ul className="space-y-2">{items[key].map(item => {
-        const kind = key === 'ingredients' ? 'ingredient' : 'product';
-        return <li key={item.id} className="space-y-2 rounded-lg border border-line p-4"><p dir="auto" className="break-words text-base">{item.name}</p><div className="space-y-2"><ItemAgency agency={item.agency} />{item.certificationRaw && item.certificationRaw.trim() !== item.agency?.trim() && <p className="break-words text-base">{item.certificationRaw}</p>}{item.statusRaw && <p className="break-words text-base">{item.statusRaw}</p>}<div className="flex flex-wrap gap-2">{[item.dpm === 'dairy_equipment' ? 'DE' : item.dpm ? item.dpm[0].toUpperCase() + item.dpm.slice(1) : '', item.confidence !== undefined && item.confidence < 0.8 ? 'Check' : ''].filter(Boolean).map(chip => <FactoryItemChip key={chip}>{chip}</FactoryItemChip>)}</div></div><p className="text-base">{group1Label}: {item.group1 ? 'Yes' : '—'} {item.group1Source === 'admin' && '(set by admin)'}</p>{isAdmin && <div className="flex flex-wrap gap-2"><button type="button" className={sourceButton} disabled={saving !== null} onClick={() => void mark(kind, item, !item.group1)}>{saving === `${kind}:${item.id}` ? 'Saving…' : item.group1 ? `Remove ${group1Label}` : `Mark as ${group1Label}`}</button>{item.group1Source === 'admin' && <button type="button" className={sourceButton} disabled={saving !== null} onClick={() => void mark(kind, item, null)}>Use source value</button>}</div>}</li>;
-      })}</ul></section>)}
+    <div ref={root} role="dialog" aria-modal="true" aria-label={title}
+      className="flex max-h-[90dvh] w-full max-w-2xl flex-col rounded-t-2xl bg-surface text-ink tactile-4">
+      <header className="shrink-0 px-4 pt-4">
+        <div className="mb-4 flex items-start gap-4">
+          <div className="min-w-0 flex-1">
+            <h2 dir="auto" className="break-words text-2xl font-semibold">{title}</h2>
+            <p id={`${id}-lists`} className="text-sm text-ink-soft">Factory item lists</p>
+          </div>
+          <button type="button" aria-label="Close" className={`${sourceButton} h-11 w-11 shrink-0 px-0`} onClick={onClose}>
+            <X aria-hidden="true" className="mx-auto h-5 w-5" />
+          </button>
+        </div>
+        <div role="tablist" aria-labelledby={`${id}-lists`} className="grid grid-cols-2 gap-2 border-b border-line">
+          {(['ingredients', 'products'] as const).map(key => <button key={key} type="button" role="tab"
+            ref={button => { tabButtons.current[key] = button; }} id={`${id}-${key}-tab`} aria-controls={`${id}-${key}`}
+            aria-selected={list === key} tabIndex={list === key ? 0 : -1} onClick={() => selectList(key)} onKeyDown={tabKey}
+            className="flex min-h-14 min-w-0 flex-wrap content-center items-center justify-center gap-x-1 rounded-t-lg border border-b-2 border-line-control border-b-transparent px-2 py-2 text-base font-semibold text-ink-soft hover:bg-paper focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-gold active:scale-[0.97] aria-selected:border-b-ink aria-selected:bg-sunken aria-selected:text-ink transition-[transform,background-color] duration-(--dur-fast) ease-shutfey">
+            {itemTabs[key]}{counts[key] !== undefined && <span className="text-sm font-medium text-ink-soft tnum">{`(${counts[key]})`}</span>}
+          </button>)}
+        </div>
+      </header>
+      <div ref={scroll} className="min-h-0 overflow-y-auto overscroll-contain px-4 py-4">
+        {(['ingredients', 'products'] as const).map(key => <section key={key} id={`${id}-${key}`} role="tabpanel"
+          aria-labelledby={`${id}-${key}-tab`} hidden={list !== key} className="space-y-4">
+          {list === key && <>{error && <p role="alert" className="text-base text-bad">{error}</p>}{panel}</>}
+        </section>)}
+      </div>
     </div>
   </div>;
 }
