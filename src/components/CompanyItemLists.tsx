@@ -1,26 +1,37 @@
 import React, { useEffect, useState } from 'react';
-import type { SourceAttachment } from '../lib/sources';
+import { mappingReady, type SourceAttachment, type SourceConnection } from '../lib/sources';
 import { CertificatePanel } from './CertificatePanel';
 import { CompanyItemEditor } from './CompanyItemEditor';
 import { VisitSheet, visitButton, visitRequest } from './FactoryVisitScreen';
 import { setupField } from './MappingStep';
 
-type List = 'ingredients' | 'products';
+export type CompanyItemList = 'ingredients' | 'products';
+type List = CompanyItemList;
 type Row = { id:string; name:string; brand?:string; plant?:string; certifyingAgency?:string; statusRaw?:string; expiresOn?:string;
   dpm?:string; code?:string; symbolRequired?:boolean; symbolRaw?:string; attachments?:SourceAttachment[] };
 type Lists = Record<List,Row[]> & { company?: {name:string; address?:string; type?:string}; attachments?:SourceAttachment[]; access:string; sourceType:string; status:string; recovery?:boolean; savedAt?:string };
 const titles = { ingredients:'Ingredients', products:'Products' };
 const noun = { ingredients:'ingredient', products:'product' };
+const writableItems = (source: { sourceType: string | null; access?: string; status?: string }) =>
+  source.sourceType === 'airtable' && source.access === 'readwrite' && source.status === 'ok';
+
+export function itemListEditor(role: string, connection: SourceConnection | null, list: List) {
+  if (role !== 'admin' || !connection) return undefined;
+  if (connection.sheetsEditSections?.includes(list)) return 'sheet';
+  if (writableItems(connection) && connection.mapping && mappingReady(connection.mapping)) return 'company';
+}
+
 export function ItemAgency({ agency }: { agency?:string }) {
   return <div><p className="text-xs font-semibold uppercase tracking-wide text-ink-soft">Certifying kosher agency</p>
     <p className="break-words text-base" dir="auto">{agency?.trim() || 'No certification on file'}</p></div>;
 }
-export function CompanyItemLists({ companyId, role, revision, timeZone, onSaved }: {
+export function CompanyItemLists({ companyId, role, revision, timeZone, onSaved, initialList, onListClose }: {
   companyId:string; role:string; revision:number; timeZone?:string; onSaved():void;
+  initialList?: List; onListClose?():void;
 }) {
   const path = '/api/sources/companies/' + encodeURIComponent(companyId);
   const [data,setData] = useState<Lists | null>(null), [error,setError] = useState('');
-  const [list,setList] = useState<List | null>(null), [search,setSearch] = useState('');
+  const [list,setList] = useState<List | null>(initialList ?? null), [search,setSearch] = useState('');
   const [editor,setEditor] = useState<{list:List; id?:string} | null>(null);
   const [message,setMessage] = useState('');
   useEffect(() => {
@@ -30,7 +41,7 @@ export function CompanyItemLists({ companyId, role, revision, timeZone, onSaved 
   }, [path,revision]);
   if (!data) return <p className="p-4" role="status">{error || 'Loading ingredients and products…'}</p>;
   const airtable = data.sourceType === 'airtable', docs = airtable && ['admin','coordinator'].includes(role);
-  const live = data.status === 'ok', writable = airtable && data.access === 'readwrite' && live;
+  const live = data.status === 'ok', writable = writableItems(data);
   const admin = role === 'admin' && writable;
   const canEdit = admin || (role === 'admin' && airtable && data.access === 'readwrite' && !!data.recovery);
   const saved = (text:string) => {setMessage(text); onSaved();};
@@ -58,7 +69,7 @@ export function CompanyItemLists({ companyId, role, revision, timeZone, onSaved 
         {admin && <button className={visitButton} onClick={() => setEditor({list:kind})}>Add {noun[kind]}</button>}</div>
     </section>)}
     {message && !list && <p className={section} role="status">{message}</p>}
-    {list && <VisitSheet title={titles[list]+' ('+data[list].length+')'} onClose={() => setList(null)}>
+    {list && <VisitSheet title={titles[list]+' ('+data[list].length+')'} onClose={() => initialList && onListClose ? onListClose() : setList(null)}>
       {warning && <p role="status">{warning}</p>}
       <label className="block">Search by {noun[list]} name<input type="search" className={setupField} value={search} onChange={e => setSearch(e.target.value)} /></label>
       {admin && <button className={visitButton} onClick={() => setEditor({list})}>Add {noun[list]}</button>}

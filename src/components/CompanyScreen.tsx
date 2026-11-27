@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { MapPin, Phone, X } from 'lucide-react';
-import { CompanyItemLists } from './CompanyItemLists';
+import { CompanyItemLists, type CompanyItemList } from './CompanyItemLists';
 import { FeeChoice } from './FeesSheet';
 import { foodInput } from './ChecklistTemplatesScreen';
 import { useVisitFocus, visitButton, visitRequest } from './FactoryVisitScreen';
@@ -17,8 +17,9 @@ const detailFields = [['name', 'Name'], ['address', 'Address'], ['type', 'Type']
 const sectionStyle = 'space-y-4 px-4 py-5 sm:px-6';
 const dangerButton = visitButton.replace('border-line-control', 'border-bad').replace('text-ink', 'text-bad');
 
-export function CompanyScreen({ company, role, connection, yearlyCount, timeZone, onClose, onSourceSaved, onRemove }: {
+export function CompanyScreen({ company, role, connection, yearlyCount, timeZone, initialItemList, onClose, onSourceSaved, onRemove }: {
   key?: string; timeZone?: string; company: Company; role: string; connection: SourceConnection | null; yearlyCount: number | null;
+  initialItemList?: CompanyItemList;
   onClose(): void; onSourceSaved(): void; onRemove?(name: string): void;
 }) {
   const root = useVisitFocus(onClose);
@@ -46,7 +47,7 @@ export function CompanyScreen({ company, role, connection, yearlyCount, timeZone
         </div>
       </header>
       <div className="divide-y divide-line rounded-xl border border-line bg-surface tactile-1">
-        {isAdmin && <section className={sectionStyle}>
+        {!initialItemList && isAdmin && <section className={sectionStyle}>
           <h3 className="text-xl font-semibold">Company details</h3>
           {sheetEditing
             ? <SheetRecordEditor section="companies" row={company} inlineCompany onClose={onClose} onSaved={sourceSaved} />
@@ -55,16 +56,17 @@ export function CompanyScreen({ company, role, connection, yearlyCount, timeZone
             ? <AirtableCompanyDetails key={JSON.stringify([company.id, connection.baseId])} company={company} connection={connection} onSaved={sourceSaved} />
             : <CompanyDetails company={company} connection={connection} editable={canWrite && canEdit(role, connection)} onSaved={sourceSaved} />}
         </section>}
-        {!company.archived && <CompanyItemLists companyId={company.id} role={role} timeZone={timeZone} revision={sourceRevision} onSaved={sourceSaved} />}
-        {!company.archived && <section className={sectionStyle}>
+        {!company.archived && <CompanyItemLists companyId={company.id} role={role} timeZone={timeZone} revision={sourceRevision}
+          initialList={initialItemList} onListClose={onClose} onSaved={sourceSaved} />}
+        {!initialItemList && !company.archived && <section className={sectionStyle}>
           <h3 className="text-xl font-semibold">Fees</h3>
           {isAdmin ? <CompanyFees id={company.id} yearlyCount={yearlyCount} sourceRevision={sourceRevision} />
             : <VisitFee id={company.id} />}
         </section>}
-        <section className={sectionStyle}>
+        {!initialItemList && <section className={sectionStyle}>
           <h3 className="text-xl font-semibold">{role === 'mashgiach' ? 'Location' : 'Location & contacts'}</h3>
           <CompanyLocation id={company.id} role={role} editable={canWrite} sourceRevision={sourceRevision} />
-        </section>
+        </section>}
         {onRemove && isAdmin && <section className={sectionStyle}>
           <h3 className="text-xl font-semibold">Danger zone</h3>
           <p>Permanently remove or archive this company.</p>
