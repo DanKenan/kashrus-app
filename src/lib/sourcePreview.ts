@@ -123,3 +123,14 @@ export function summarizeValues(uses: { kind: ValueKind; column: string; value: 
     }));
   });
 }
+
+export const airtableMappingCopy = {
+  wrongType: (field: string) => `This Airtable field has the wrong type for ${field}. Choose a different field.`,
+  wrongTable: 'This link points to a different Airtable table. Choose the relationship that connects to your companies.',
+  ambiguous: 'More than one company matches this value. Shutfey cannot assign it safely.',
+  missing: (category: string) => `${category} are not connected for this agency.`,
+  stale: 'This connection changed in Airtable. Reload and review before saving.',
+  uncertain: 'Airtable may have changed this connection. Reload and review before retrying.',
+  partial: 'The move was only partly completed. Review the affected records before trying again.',
+  schemaChanged: 'Your Airtable structure changed. Review the affected fields before editing.',
+};

@@ -1,7 +1,9 @@
+import { compatibleField, recordIdPattern } from './write.ts';
+import type { AirtableField, AirtableTable, EntityKind, EntityMapping, FieldBinding, MappingIssue, RelationshipMapping } from './types.ts';
 import { parseMoney } from '../../lib/sourceAmount.ts';
 export { parseMoney } from '../../lib/sourceAmount.ts';
 import type { Company, Dpm, SourceData, SourceMapping, SourceAttachment, SourceRow, SourceTable } from './types.ts';
-import { isBuiltinFieldKey, type SourceSection } from '../../lib/sourcePreview.ts';
+import { airtableMappingCopy, isBuiltinFieldKey, type SourceSection } from '../../lib/sourcePreview.ts';
 
 const normalized = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
 const folded = (s: string) => s.trim().toLowerCase();
@@ -45,7 +47,7 @@ function overlap(name: string, aliases: string[]): number {
   }));
 }
 // Partial mappings deliberately leave missing tables/columns unset for the caller to review.
-export type GuessedMapping = { [K in keyof Omit<SourceMapping, 'group1Values' | 'valueAssignments' | 'editableCustomFields' | 'certificationOrganizations'>]: Partial<SourceMapping[K]> } & { group1Values: string[] };
+export type GuessedMapping = { [K in keyof Omit<SourceMapping, 'group1Values' | 'valueAssignments' | 'editableCustomFields' | 'certificationOrganizations' | 'version' | 'entities' | 'relationships'>]: Partial<SourceMapping[K]> } & { group1Values: string[] };
 export function guessMapping(tables: SourceTable[]): { mapping: GuessedMapping; guessed: Record<string, number> } {
   const mapping: GuessedMapping = { companies: {}, ingredients: {}, products: {}, group1Values: ['Group 1'] };
   const guessed: Record<string, number> = {};
@@ -275,4 +277,187 @@ export function mapSourceLists(
       code: read(r, p.code), symbolRequired, ...(typeof raw === 'string' && {symbolRaw: raw}), plant: read(r, p.plant), extra: extra(r, p, 'products') };
   });
   return { companies, ingredients, products, otherCompanies };
+}
+
+export const entitySections = { company: 'companies', ingredient: 'ingredients', product: 'products' } as const;
+export type PilotKind = keyof typeof entitySections;
+export const mappingFields: Record<PilotKind, Record<string, string>> = {
+  company: { name: 'Name', address: 'Address', type: 'Type', brand: 'Brand', plant: 'Plant', locAttachment: 'Letter of Certification (LOC)' },
+  ingredient: { name: 'Name', brand: 'Brand', plant: 'Plant', certification: 'Certification', agency: 'Certifying agency', status: 'Status', expiresOn: 'Expiration date', locAttachment: 'Letter of Certification (LOC)' },
+  product: { name: 'Name', brand: 'Brand', plant: 'Plant', certification: 'Certification', agency: 'Certifying agency', status: 'Status', code: 'Code / UPC', symbolRequired: 'Symbol required' },
+};
+const computedTypes = new Set(['formula', 'rollup', 'multipleLookupValues', 'lookup']);
+const definition = (key: string, field: AirtableField) => key === 'locAttachment'
+  ? field.type === 'multipleAttachments'
+  : compatibleField(key, field);
+
+// Project the v1 shape for inspection without changing its reader, writer, IDs or permissions.
+export function describeAirtableMapping(mapping: SourceMapping, tables: AirtableTable[]) {
+  if (mapping.version === 2) return { entities: mapping.entities ?? [], relationships: mapping.relationships ?? [] };
+  const entities: EntityMapping[] = [], relationships: RelationshipMapping[] = [];
+  for (const [kind, section] of Object.entries(entitySections) as [PilotKind, SourceSection][]) {
+    const config = mapping[section] as Record<string, unknown>;
+    const table = tables.find(t => t.name === config.table || t.id === config.table);
+    if (!table?.id) continue;
+    const fields = Object.fromEntries(Object.entries(config).flatMap(([key, name]) => {
+      const field = table.fields.find(f => f.name === name);
+      return field?.id && Object.hasOwn(mappingFields[kind], key) ? [[key, {fieldId: field.id, fieldName: field.name, expectedType: field.type, writable: false}]] : [];
+    }));
+    entities.push({ id: kind, kind, tableId: table.id, tableName: table.name, fields });
+    const field = kind !== 'company' && table.fields.find(f => f.name === config.companyLink);
+    if (field && field.id) relationships.push({ id: kind, fromEntity: kind, toEntity: 'company', kind: field.type === 'multipleRecordLinks' ? 'linked-record' : 'text-reference',
+      ownership: 'from', cardinality: 'many-to-many', fieldId: field.id, fieldName: field.name, writable: false });
+  }
+  return { entities, relationships };
+}
+
+type CompiledEntity = { mapping: EntityMapping; table: AirtableTable; fields: Record<string, AirtableField>; bindings: FieldBinding[] };
+type CompiledRelationship = { mapping: RelationshipMapping; owner: CompiledEntity; field: AirtableField; writable: boolean };
+export function validateAirtableMapping(mapping: SourceMapping, tables: AirtableTable[], access: 'read' | 'readwrite' = 'read') {
+  const entities: Partial<Record<PilotKind, CompiledEntity>> = {};
+  const relationships: Partial<Record<'ingredient' | 'product', CompiledRelationship>> = {};
+  const issues: MappingIssue[] = [];
+  const report = (entity: EntityKind, message: string, field?: string, blocking = false) => issues.push({ entity, field, message, blocking });
+  const source = describeAirtableMapping(mapping, tables);
+  const projection: SourceMapping = {
+    companies: { table: '', name: '' }, ingredients: { table: '' }, products: { table: '' },
+    group1Values: mapping.group1Values, valueAssignments: mapping.valueAssignments, certificationOrganizations: mapping.certificationOrganizations,
+  };
+  for (const entity of source.entities) {
+    if (!Object.hasOwn(entitySections, entity.kind)) continue;
+    const kind = entity.kind as PilotKind;
+    const table = tables.find(t => t.id === entity.tableId);
+    if (!table) { report(kind, airtableMappingCopy.schemaChanged, 'table', true); continue; }
+    if (entity.filter) {
+      const field = table.fields.find(f => f.id === entity.filter!.fieldId);
+      if (field?.type !== 'singleSelect' || !entity.filter.values.every(value => field.options?.choices?.some(choice => choice.name === value))) {
+        report(kind, 'Choose available values from a single-select Airtable field.', 'filter', true);
+        continue;
+      }
+    }
+    const fields: Record<string, AirtableField> = {};
+    const bindings: FieldBinding[] = [];
+    for (const [key, binding] of Object.entries(entity.fields)) {
+      const field = table.fields.find(f => f.id === binding.fieldId);
+      const aliases = Object.entries(entity.fields).filter(([other, value]) => other !== key && value.fieldId === binding.fieldId);
+      const computed = !!field && computedTypes.has(field.type);
+      const resultType = field?.options?.result?.type;
+      const readableComputed = computed && key !== 'locAttachment' && !!resultType && definition(key, { ...field!, type: resultType });
+      const label = mappingFields[kind][key] ?? key;
+      if (!field || field.type !== binding.expectedType || !(definition(key, field) || readableComputed)) {
+        report(kind, airtableMappingCopy.wrongType(label), key, key === 'name');
+        continue;
+      }
+      if (aliases.length && key !== 'name') {
+        report(kind, 'Choose a separate Airtable field for ' + label + '.', key);
+        continue;
+      }
+      fields[key] = field;
+      bindings.push({ targetField: key, ownerEntity: entity.id, fieldId: field.id,
+        writable: access === 'readwrite' && key !== 'locAttachment' && binding.writable && !computed && !aliases.length && field.id !== entity.filter?.fieldId &&
+          (key !== 'type' || field.type === 'singleSelect') });
+    }
+    if (!fields.name) {
+      if (!entity.fields.name) report(kind, 'Choose an Airtable field for Name.', 'name', true);
+      continue;
+    }
+    entities[kind] = { mapping: entity, table, fields, bindings };
+    Object.assign(projection[entitySections[kind]], { table: table.id }, Object.fromEntries(Object.entries(fields).map(([key, f]) => [key, f.id])));
+  }
+  const a = entities.ingredient?.mapping, b = entities.product?.mapping;
+  if (a && b && a.tableId === b.tableId && (!a.filter || !b.filter || a.filter.fieldId !== b.filter.fieldId ||
+      a.filter.values.some(value => b.filter!.values.includes(value)))) {
+    for (const kind of ['ingredient', 'product'] as const) {
+      report(kind, 'Choose separate type values for ingredients and products.', 'filter', true);
+      delete entities[kind];
+    }
+  }
+  if (!entities.company && !issues.some(issue => issue.entity === 'company')) report('company', 'Choose an Airtable company table.', 'table', true);
+  for (const relationship of source.relationships) {
+    const entry = (['ingredient', 'product'] as const).find(kind => entities[kind]?.mapping.id === relationship.fromEntity);
+    const company = entities.company;
+    if (!entry || !company || company.mapping.id !== relationship.toEntity) continue;
+    const from = entities[entry]!;
+    const reverse = relationship.kind === 'reverse-linked-record';
+    const linked = reverse || relationship.kind === 'linked-record';
+    const owner = reverse ? company : from;
+    const field = owner.table.fields.find(f => f.id === relationship.fieldId);
+    if (!field || relationship.ownership !== (reverse ? 'to' : 'from') ||
+        !(linked ? field.type === 'multipleRecordLinks' : relationship.kind === 'text-reference' && compatibleField('name', field))) {
+      report(entry, airtableMappingCopy.schemaChanged, 'relationship');
+      continue;
+    }
+    if (linked && field.options?.linkedTableId !== (reverse ? from : company).table.id) {
+      report(entry, airtableMappingCopy.wrongTable, 'relationship');
+      continue;
+    }
+    // Airtable's single-record UI preference is useful only as a fail-closed constraint.
+    const writable = access === 'readwrite' && linked && relationship.writable &&
+      !(field.options?.prefersSingleRecordLink && (reverse && relationship.cardinality !== 'one-to-one' ||
+        !reverse && relationship.cardinality === 'many-to-many'));
+    relationships[entry] = { mapping: relationship, owner, field, writable };
+    for (const entity of Object.values(entities)) {
+      if (entity.table.id === owner.table.id) for (const binding of entity.bindings)
+        if (binding.fieldId === field.id) binding.writable = false;
+    }
+  }
+  return { entities, relationships, issues, projection };
+}
+
+export const rowMatchesEntity = (row: SourceRow, entity: CompiledEntity) => {
+  const { filter } = entity.mapping;
+  const name = row.fields[entity.fields.name.id];
+  return typeof name === 'string' && !!name.trim() && (!filter || filter.values.includes(row.fields[filter.fieldId] as string));
+};
+
+export const linkIds = (value: unknown): string[] | undefined => value == null ? [] :
+  Array.isArray(value) && value.every(id => typeof id === 'string' && recordIdPattern.test(id)) && new Set(value).size === value.length ? value : undefined;
+
+export function mapAirtableEntities(rows: Record<string, SourceRow[]>, schema: ReturnType<typeof validateAirtableMapping>): SourceData {
+  const { entities, relationships, projection, issues } = schema;
+  const rawCompanies = entities.company ? rows[entities.company.table.id] ?? [] : [];
+  const companies = entities.company ? rawCompanies.filter(row => rowMatchesEntity(row, entities.company!)) : [];
+  const input: Partial<Record<SourceSection, SourceRow[]>> = { companies };
+  const companyIds = new Set(companies.map(row => row.id));
+  const unresolved: MappingIssue[] = [];
+  for (const kind of ['ingredient', 'product'] as const) {
+    const entity = entities[kind], relationship = relationships[kind], section = entitySections[kind];
+    if (!entity || !relationship) continue;
+    const fieldId = relationship.field.id;
+    const reverse = new Map<string, string[]>();
+    if (relationship.mapping.kind === 'reverse-linked-record') {
+      for (const row of rawCompanies) for (const itemId of linkIds(row.fields[fieldId]) ?? []) {
+        const owners = reverse.get(itemId) ?? [];
+        owners.push(row.id);
+        reverse.set(itemId, owners);
+      }
+    }
+    const byName = new Map<string, string[]>();
+    if (relationship.mapping.kind === 'text-reference' && entities.company) for (const row of rawCompanies) {
+      const name = row.fields[entities.company.fields.name.id];
+      if (typeof name !== 'string' || !name.trim()) continue;
+      const matches = byName.get(folded(name)) ?? [];
+      matches.push(row.id);
+      byName.set(folded(name), matches);
+    }
+    projection[section].companyLink = '__shutfeyCompanyIds';
+    input[section] = (rows[entity.table.id] ?? []).filter(row => rowMatchesEntity(row, entity)).flatMap(row => {
+      const value = row.fields[fieldId];
+      const all = relationship.mapping.kind === 'text-reference' ? (typeof value === 'string' ? byName.get(folded(value)) ?? [] : [])
+        : relationship.mapping.kind === 'reverse-linked-record' ? reverse.get(row.id) ?? [] : linkIds(value);
+      if (!all || (relationship.mapping.cardinality !== 'many-to-many' || relationship.mapping.kind === 'text-reference') && all.length > 1) {
+        const message = relationship.mapping.kind === 'text-reference' ? airtableMappingCopy.ambiguous : airtableMappingCopy.schemaChanged;
+        if (!unresolved.some(issue => issue.entity === kind && issue.message === message)) unresolved.push({ entity: kind, field: 'relationship', message });
+        return [];
+      }
+      // Only a typed relationship can expose unassigned records to the admin assignment picker.
+      const linked = all.filter(id => companyIds.has(id));
+      if (!linked.length && !relationship.writable) return [];
+      return [{ ...row, fields: { ...row.fields, __shutfeyCompanyIds: linked } }];
+    });
+  }
+  return { ...mapSourceLists(input, projection, { resolveLinks: value => Array.isArray(value) ? value : [] }),
+    mappingIssues: [...issues, ...unresolved],
+    relationshipWrites: { ingredient: !!relationships.ingredient?.writable, product: !!relationships.product?.writable },
+    connectedLists: { company: !!entities.company, ingredient: !!relationships.ingredient, product: !!relationships.product, contact: false } };
 }

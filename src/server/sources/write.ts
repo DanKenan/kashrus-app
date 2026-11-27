@@ -1,3 +1,5 @@
+import type { AirtableField, AirtableTable } from './types.ts';
+export type { AirtableField, AirtableTable } from './types.ts';
 import type { Connection } from './store.ts';
 // Every list write passes this single guard. Report routes have no writer reference.
 export function guardSourceWrite(c: Connection | undefined, list: string, fields: unknown): Record<string, string>;
@@ -39,8 +41,6 @@ export function guardSourceWrite(c: Connection | undefined, list: string, fields
 
 export type ItemList = 'ingredients' | 'products';
 export type Cell = string | null | boolean;
-export type AirtableField = { id: string; name: string; type: string; options?: { linkedTableId?: string; choices?: { name: string }[] } };
-export type AirtableTable = { id: string; name: string; fields: AirtableField[] };
 export const recordIdPattern = /^rec[A-Za-z0-9]{1,64}$/;
 export function fail(status: number, message: string): never {
   throw Object.assign(new Error(message), { status });
@@ -63,6 +63,7 @@ export function compatibleField(key: string, field?: AirtableField) {
   return textTypes.includes(field.type);
 }
 export function itemSchema(c: Connection, list: ItemList, tables: AirtableTable[]) {
+  if (c.mapping.version === 2) fail(409, 'Use the configured Airtable relationship.');
   const config = c.mapping[list], table = tableSchema(tables, config.table);
   const company = tableSchema(tables, c.mapping.companies.table);
   if (new Set([company, tableSchema(tables, c.mapping.ingredients.table), tableSchema(tables, c.mapping.products.table)]).size !== 3)
@@ -84,7 +85,7 @@ export function itemSchema(c: Connection, list: ItemList, tables: AirtableTable[
   if (!fields.name) fail(409, 'Map the item name to a unique text column.');
   return { fields, warnings, table, link };
 }
-function serializeItemFields(c: Connection, definitions: Record<string, AirtableField>, input: unknown) {
+export function serializeItemFields(c: Connection, definitions: Record<string, AirtableField>, input: unknown) {
   if (c.sourceType !== 'airtable' || c.access !== 'readwrite') fail(403, 'This Airtable connection is read only. Contact an administrator.');
   if (!input || typeof input !== 'object' || Array.isArray(input) || !Object.keys(input).length) fail(400, 'Invalid fields');
   const values: Record<string, Cell> = Object.create(null);

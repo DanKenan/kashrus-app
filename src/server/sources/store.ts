@@ -5,6 +5,11 @@ import type { AddAudit, AirtableOperation, AirtableEditAudit, EditAudit } from '
 import type { Backup } from './cache.ts';
 import type { Group1Overrides, SourceKind, SourceMapping } from './types.ts';
 
+export type AirtableEditLedgerEntry = Omit<AirtableOperation, 'action'> & {
+  action: AirtableOperation['action'] | 'move';
+  relationshipChanges?: { table: string; recordId: string; fieldId: string; before: string[]; after: string[]; confirmed?: boolean }[];
+};
+
 export interface Connection {
   airtableDirectRemoval?: boolean;
   sheetsPilot?: import('./google-sheets.ts').TaggedTable; // Existing Fee pilot connections
@@ -213,12 +218,12 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
   function airtableLedger(agencyId: string, operationId: string) {
     const id = 'airtable-' + digest(JSON.stringify([agencyId, operationId]));
     // Limit the idempotency window while retaining untouched audit documents.
-    function active(entry: AirtableOperation | null): AirtableOperation | null {
+    function active(entry: AirtableEditLedgerEntry | null): AirtableEditLedgerEntry | null {
       return entry && entry.outcome !== 'rejected' && Date.parse(entry.at) + 7 * 86400_000 > Date.now() ? entry : null;
     }
     const get = async () => active(await read(auditCollection, id));
-    const put = (entry: AirtableOperation) => commit([{ collection: auditCollection, id, doc: entry }]);
-    return { get, finish: put, async claim(entry: AirtableOperation): Promise<AirtableOperation | null> {
+    const put = (entry: AirtableEditLedgerEntry) => commit([{ collection: auditCollection, id, doc: entry }]);
+    return { get, finish: put, async claim(entry: AirtableEditLedgerEntry): Promise<AirtableEditLedgerEntry | null> {
       if (deps.staged()) throw Error('Writes blocked');
       const db = deps.db();
       if (db) {
@@ -231,7 +236,7 @@ export function createSourceStore(deps: { db(): any; dataDir: string; staged(): 
           return null;
         });
       }
-      let prior: AirtableOperation | null = null;
+      let prior: AirtableEditLedgerEntry | null = null;
       await localWrite(async () => { prior = await get(); if (!prior) await put(entry); });
       return prior;
     } };

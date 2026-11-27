@@ -2,7 +2,11 @@ type ValueAssignment = { agency?: string; dpm?: 'dairy' | 'dairy_equipment' | 'p
 import { apiFetch } from './api';
 
 export type SourceAttachment = { id: string; filename: string; size?: number; contentType?: string };
+export type { AirtableField, EntityKind, EntityMapping, MappingIssue, RelationshipMapping } from '../server/sources/types';
 export interface SourceMapping {
+  version?: 1 | 2;
+  entities?: import('../server/sources/types').EntityMapping[];
+  relationships?: import('../server/sources/types').RelationshipMapping[];
   certificationOrganizations?: Partial<Record<'ingredients' | 'products', boolean>>;
   editableCustomFields?: import('./sourcePreview').EditableCustomFields;
   companies: { locAttachment?: string; file?: { id: string; name: string }; address?: string; companyFee?: string; mashgiachFee?: string; table: string; name: string; type?: string; factoryValues?: string[]; foodServiceValues?: string[]; brand?: string; plant?: string };
@@ -12,7 +16,7 @@ export interface SourceMapping {
   group1Values: string[];
 }
 
-export interface SourceTable { name: string; columns: string[]; fieldTypes?: Record<string, string> }
+export type SourceTable = import('../server/sources/types').SourceTable;
 export interface SourceConnection {
   group1Label?: string; sourceType: string | null; baseId?: string; access?: 'read' | 'readwrite'; mapping?: SourceMapping;
   hasKey?: boolean; keyHint?: string; status?: 'recovering' | 'never' | 'ok' | 'stale' | 'backup' | 'error';
@@ -29,6 +33,7 @@ export const emptyMapping = (): SourceMapping => ({
   products: { table: '', companyLink: '', name: '' }, group1Values: ['Group 1'],
 });
 export function mappingReady(mapping: SourceMapping): boolean {
+  if (mapping.version === 2) return !!mapping.entities?.some(entity => entity.kind === 'company' && entity.fields.name?.fieldId);
   return [mapping.companies, mapping.ingredients, mapping.products].every(g => !!g.table && !!g.name)
     && !!mapping.ingredients.companyLink && !!mapping.products.companyLink;
 }

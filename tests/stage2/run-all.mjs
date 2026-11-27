@@ -227,7 +227,14 @@ export async function runAll(baseUrl, extraCtx = {}) {
     (await import('./test-112-shiftdel-sort.mjs')).default, // SHIFTDEL-SORT
     (await import('./test-113-checkin-overdue.mjs')).default, // CHECKIN-OVERDUE
     (await import('./test-114-checklist.mjs')).default,
-    (await import('./test-115-sources.mjs')).default,
+    {
+      ...(await import('./test-115-sources.mjs')).default,
+      async run(baseUrl, ctx) {
+        const legacy = await (await import('./test-115-sources.mjs')).default.run(baseUrl, ctx);
+        const pilot = await (await import('./airtable-flexible-cases.mjs')).flexibleMappingCases(baseUrl, ctx);
+        return [legacy, pilot].join(' · ');
+      },
+    },
     (await import('./test-116-inspection-reports.mjs')).default,
     (await import('./test-117-inspection-schedule.mjs')).default,
     (await import('./test-118-food-service-inbox.mjs')).default,

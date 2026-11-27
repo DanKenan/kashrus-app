@@ -6,7 +6,7 @@ import type { SourceAttachment } from '../lib/sources';
 type Value = string | boolean | null;
 type EditorData = { fields: Record<string, Value>; typeOptions: Record<string, string[]>; fieldTypes: Record<string,string>;
   addScope?: string[]; pending?: {name?:string; recordId?:string};
-  baseId: string; updatedAt: string; companyIds: string[]; warnings: string[]; linked?: {id:string;name:string}[]; existing?: {id:string; name:string; brand?:string; plant?:string}[] };
+  readOnlyFields?: string[]; baseId: string; updatedAt: string; companyIds: string[]; warnings: string[]; linked?: {id:string;name:string}[]; existing?: {id:string; name:string; brand?:string; plant?:string}[] };
 const labels: Record<string,string> = { name:'Name', status:'Status', certification:'Certification / certifying agency', agency:'Certifying kosher agency',
   code:'Code / UPC', symbolRequired:'Symbol required', expiresOn:'Expiration date', brand:'Brand', plant:'Plant' };
 // Keep the operation token across dialog closes, including when tab storage is unavailable.
@@ -19,8 +19,8 @@ function rememberAdd(key:string, token:string) {
     else sessionStorage.removeItem(key);
   } catch {}
 }
-export function CompanyItemEditor({path, id, ingredient, files, writable = true, recovery = false, onClose, onSaved}: {
-  path:string; id?:string; writable?:boolean; recovery?:boolean; ingredient:boolean; files?:SourceAttachment[]; onClose():void; onSaved(message:string):void;
+export function CompanyItemEditor({path, id, ingredient, files, flexible = false, writable = true, recovery = false, onClose, onSaved}: {
+  path:string; id?:string; flexible?:boolean; writable?:boolean; recovery?:boolean; ingredient:boolean; files?:SourceAttachment[]; onClose():void; onSaved(message:string):void;
 }) {
   const [baseline,setBaseline] = useState<EditorData | null>(null);
   const [draft,setDraft] = useState<Record<string,Value>>({});
@@ -138,12 +138,18 @@ export function CompanyItemEditor({path, id, ingredient, files, writable = true,
         <option value="">Choose an existing {label}</option>{baseline.existing?.map(item => <option key={item.id} value={item.id}>{[item.name,item.brand,item.plant,item.id].filter(Boolean).join(' · ')}</option>)}
       </select></label> : mode === 'remove' ? <p>Remove this {label} from this company? Its Airtable record, documents and other company links will be kept.</p> :
         <fieldset className="space-y-3" disabled={editBlocked || uncertainAdd}>
-          {baseline.companyIds.length > 1 && <p>This record is shared. Changes are visible to every linked company.</p>}
+          {baseline.companyIds.length > 1 && (flexible ? <>
+            <h3 className="font-semibold">{ingredient ? 'Ingredient details — shared across establishments.' : 'Product details — shared across establishments.'}</h3>
+            <p>{ingredient ? 'This ingredient is shared with other companies. Changes to its details will appear everywhere it is used.' :
+              'This item is shared with other companies. Changes to its details will appear everywhere it is used.'}</p>
+          </> : <p>This record is shared. Changes are visible to every linked company.</p>)}
           {baseline.warnings?.map(w => <p key={w}>{w}</p>)}
           {Object.keys(baseline.fields).map(key => {
             const change = (v:Value) => { setRequested(null); setDraft(prev => ({...prev,[key]:v})); };
             const value = String(fields[key] ?? '');
             const common = {className:setupField, required:key === 'name', value, onChange:(e:React.ChangeEvent<HTMLInputElement|HTMLTextAreaElement|HTMLSelectElement>) => change(e.target.value || null)};
+            if (baseline.readOnlyFields?.includes(key))
+              return <div key={key}><p>{labels[key] || key} · Read only</p><p className="break-words">{value || '—'}</p></div>;
             return <label key={key} className="block">{labels[key] || key}
               {baseline.fieldTypes[key] === 'checkbox' ? <input className="ml-3 min-h-11" type="checkbox" checked={fields[key] === true} onChange={e => change(e.target.checked)} />
               : baseline.typeOptions[key] ? <select {...common}><option value=""></option>{baseline.typeOptions[key].map(v => <option key={v}>{v}</option>)}</select>
@@ -158,8 +164,8 @@ export function CompanyItemEditor({path, id, ingredient, files, writable = true,
         <ul>{conflicts.map(key => <li key={key}>{labels[key] || key} · Requested: {String(requested?.[key] ?? '—')} · Current: {String(baseline.fields[key] ?? '—')}</li>)}</ul>
         <button className={visitButton} onClick={() => { setRequested(null); setConflicts([]); }}>Use current Airtable values</button>
       </section>}
-      {id && !recovery && ingredient && mode === 'create' && <CertificatePanel path={row+'/documents'} files={files} writable={writable} onSaved={() => onSaved('PDF saved in Airtable.')} />}
-      {id && !recovery && mode === 'create' && <details><summary className="min-h-11">More actions</summary><button className={visitButton} disabled={editBlocked} onClick={() => setMode('remove')}>Remove from this company</button></details>}
+      {id && !flexible && !recovery && ingredient && mode === 'create' && <CertificatePanel path={row+'/documents'} files={files} writable={writable} onSaved={() => onSaved('PDF saved in Airtable.')} />}
+      {id && !flexible && !recovery && mode === 'create' && <details><summary className="min-h-11">More actions</summary><button className={visitButton} disabled={editBlocked} onClick={() => setMode('remove')}>Remove from this company</button></details>}
       {!uncertainAdd && <button className={visitButton} disabled={editBlocked || (mode === 'existing' ? !relation : mode === 'create' && (!String(fields.name ?? '').trim() || !Object.keys(changed).length))} onClick={save}>
         {busy ? 'Saving…' : mode === 'existing' ? 'Restore to this company' : mode === 'remove' ? 'Remove from this company' : 'Save changes'}</button>}
     </>}

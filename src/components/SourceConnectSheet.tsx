@@ -1,7 +1,7 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
-import { assigned, builtinFieldKeys, previewRows, summarizeValues, type SourceValue, type SourceSamples } from '../lib/sourcePreview';
+import { airtableMappingCopy, assigned, builtinFieldKeys, previewRows, summarizeValues, type SourceValue, type SourceSamples } from '../lib/sourcePreview';
 import { ChevronDown, Plus, X } from 'lucide-react';
-import { emptyMapping, mappingReady, sourceRequest, type SourceConnection, type SourceMapping, type SourceTable } from '../lib/sources';
+import { emptyMapping, mappingReady, sourceRequest, type AirtableField, type EntityMapping, type MappingIssue, type RelationshipMapping, type SourceConnection, type SourceMapping, type SourceTable } from '../lib/sources';
 
 export const sourceButton = 'pressable min-h-11 rounded-lg border border-line-control bg-surface px-3 text-base font-semibold text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold disabled:opacity-50';
 const helpButton = 'pressable inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-line-control bg-surface text-base font-semibold text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold disabled:opacity-50';
@@ -10,7 +10,9 @@ const mappingFieldClass = 'min-h-11 w-full min-w-0 rounded-md border border-line
 const fieldClass = 'min-h-11 w-full min-w-0 rounded-lg border border-line-control bg-surface px-3 text-base text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold';
 interface Props { isOpen: boolean; connection: SourceConnection; onClose: () => void; onSaved: () => void }
 export function SourceConnectSheet(props: Props) {
-  return props.isOpen ? <SourceConnectForm {...props} /> : null;
+  if (!props.isOpen) return null;
+  return !props.connection.mapping || props.connection.mapping.version === 2
+    ? <FlexibleAirtableWizard {...props} /> : <SourceConnectForm {...props} />;
 }
 export const sourceMatchingFields = {
   companies: [['name', 'Name'], ['type', 'Type'], ['brand', 'Brand (optional)'], ['plant', 'Plant / location (optional)']],
@@ -511,4 +513,242 @@ export function SourceConnectForm({ connection, onClose, onSaved }: Props) {
       </form>
     </div>
   </div>;
+}
+
+const flexibleKinds = ['company', 'ingredient', 'product'] as const;
+const flexibleNames = { company: 'Companies', ingredient: 'Ingredients', product: 'Products' } as const;
+const flexibleFields = {
+  company: [...sourceMatchingFields.companies, ['address', 'Address'], ['locAttachment', 'Letter of Certification (LOC)']],
+  ingredient: [...sourceMatchingFields.ingredients.slice(1), ['locAttachment', 'Letter of Certification (LOC)']],
+  product: sourceMatchingFields.products.slice(1),
+} as const;
+const wizardHeadings = ['Find your Airtable tables', 'Where are your records stored?', 'How are these records connected?', 'Review your connection'];
+type WizardPreview = {
+  issues: MappingIssue[];
+  connected: Record<string, boolean>;
+  fields: Record<string, Record<string, string>>;
+  relationships: Record<string, string>;
+  companies: { id: string; name: string; ingredients: string[]; products: string[] }[];
+};
+
+export function FlexibleAirtableWizard({ connection, onSaved, onClose }: Props) {
+  const [baseId, setBaseId] = useState(connection.baseId ?? '');
+  const [apiKey, setApiKey] = useState('');
+  const [tables, setTables] = useState<SourceTable[]>([]);
+  const [access, setAccess] = useState<'read' | 'readwrite'>('read');
+  const [entities, setEntities] = useState<EntityMapping[]>(connection.mapping?.entities ?? []);
+  const [relations, setRelations] = useState<RelationshipMapping[]>(connection.mapping?.relationships ?? []);
+  const [cardinalitySet, setCardinalitySet] = useState(() => new Set(relations.map(relation => relation.id)));
+  const [step, setStep] = useState(0);
+  const [preview, setPreview] = useState<WizardPreview>();
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+  const dialog = useRef<HTMLDialogElement>(null);
+  const body = useRef<HTMLDivElement>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const inFlight = useRef(false);
+  const titleId = useId();
+  useEffect(() => { dialog.current?.showModal?.(); }, []);
+  useEffect(() => { body.current?.scrollTo(0, 0); if (step) heading.current?.focus(); }, [step]);
+  const payload = () => ({ sourceType: 'airtable', baseId: baseId.trim(), ...(apiKey.trim() && { apiKey: apiKey.trim() }) });
+  const mapping = (): SourceMapping => ({ ...emptyMapping(), version: 2, entities, relationships: relations,
+    group1Values: connection.mapping?.group1Values ?? ['Group 1'] });
+  async function run(action: 'discover' | 'preview' | 'save') {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setBusy(true); setError('');
+    try {
+      if (action === 'discover') {
+        const result = await sourceRequest('/api/sources/test', 'POST', { ...payload(), discovery: true });
+        if (!result.ok) throw Error(result.error || "Couldn't test the connection. Try again.");
+        const discovered = (result.tables as SourceTable[]).filter(table => table.id && table.fields);
+        setTables(discovered); setAccess(result.access);
+        if (baseId.trim() !== connection.baseId || !connection.mapping) {
+          setRelations([]); setCardinalitySet(new Set());
+          setEntities(flexibleKinds.flatMap(kind => {
+            const suggested = result.guess?.mapping?.[flexibleNames[kind].toLowerCase()];
+            const table = discovered.find(t => t.name === suggested?.table);
+            if (!table?.id) return [];
+            const name = table.fields?.find(f => f.name === suggested.name && ['singleLineText', 'multilineText'].includes(f.type));
+            return [{ id: kind, kind, tableId: table.id, fields: name ? {
+              name: {fieldId: name.id, fieldName: name.name, expectedType: name.type, writable: false}
+            } : {} }];
+          }));
+        }
+        setStep(1);
+      } else if (action === 'preview') {
+        setPreview(undefined);
+        const result = await sourceRequest('/api/sources/airtable-mapping/preview', 'POST', { ...payload(), mapping: mapping() });
+        setPreview(result);
+      } else {
+        await sourceRequest('/api/sources/connection', 'PUT', { ...payload(), access, mapping: mapping() });
+        setMessage('Airtable connection saved.'); setApiKey(''); onSaved();
+      }
+    } catch (cause: any) { setError(cause.message); }
+    finally { inFlight.current = false; setBusy(false); }
+  }
+  const tableFor = (kind: string) => tables.find(table => table.id === entities.find(entity => entity.kind === kind)?.tableId);
+  const updateEntity = (kind: string, edit: (entity: EntityMapping) => EntityMapping) =>
+    setEntities(previous => previous.map(entity => entity.kind === kind ? edit(entity) : entity));
+  const updateRelation = (id: string, edit: (relation: RelationshipMapping) => RelationshipMapping) =>
+    setRelations(previous => previous.map(relation => relation.id === id ? edit(relation) : relation));
+  const changeTable = (kind: EntityMapping['kind'], tableId: string) => {
+    const table = tables.find(candidate => candidate.id === tableId);
+    const previousId = entities.find(entity => entity.kind === kind)?.id;
+    const primary = table?.fields?.find(field => field.id === table.primaryFieldId && ['singleLineText', 'multilineText'].includes(field.type));
+    setEntities(previous => [...previous.filter(entity => entity.kind !== kind), ...(tableId ? [{
+      id: kind, kind, tableId, fields: primary ? {name: {fieldId: primary.id, expectedType: primary.type, writable: false}} : {},
+    }] : [])]);
+    setRelations(previous => kind === 'company' ? [] : previous.filter(relation => relation.fromEntity !== previousId));
+  };
+  const option = (f: AirtableField) => <option key={f.id} value={f.id}>{f.name} · {f.type}</option>;
+  const selectClass = mappingFieldClass + ' block';
+  const card = 'min-w-0 space-y-3 rounded-lg border border-line p-4';
+  const company = entities.find(entity => entity.kind === 'company');
+  const advance = () => {
+    setError('');
+    if (step === 2) { setPreview(undefined); setStep(3); void run('preview'); }
+    else setStep(step + 1);
+  };
+  return <dialog ref={dialog} aria-labelledby={titleId} onCancel={event => {event.preventDefault(); if (!busy) onClose();}}
+    className="fixed inset-x-0 bottom-0 top-auto mx-auto my-0 max-h-[95dvh] w-full max-w-2xl overflow-hidden rounded-t-xl bg-surface text-ink tactile-4 backdrop:bg-scrim">
+    <div className="flex max-h-[95dvh] min-w-0 flex-col">
+      <header className="flex shrink-0 items-center gap-3 border-b border-line px-4 py-2 sm:px-6">
+        <h2 id={titleId} className="flex-1 text-2xl font-semibold">Connect your Airtable</h2>
+        <button type="button" aria-label="Close" disabled={busy} onClick={onClose} className={`${sourceButton} inline-flex w-11 items-center justify-center px-0`}><X aria-hidden="true" className="size-5" /></button>
+      </header>
+      <div ref={body} className="min-h-0 space-y-4 overflow-y-auto overscroll-contain p-4 sm:px-6">
+        <ol aria-label="Connection steps" className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-ink-soft">
+          {['Find tables', 'Choose records', 'Connect records', 'Review'].map((title, index) => <li key={title} aria-current={step === index ? 'step' : undefined}
+            className={step === index ? 'font-semibold text-ink' : undefined}>{title}</li>)}
+        </ol>
+        <h3 ref={heading} tabIndex={-1} className="text-xl font-semibold">{wizardHeadings[step]}</h3>
+        <fieldset disabled={busy || !!message} className="min-w-0 space-y-4">
+          {step === 0 && <>
+            <p>Shutfey will read your table names and field types. Nothing will be changed in Airtable.</p>
+            <label className="block">Base ID<input className={selectClass} value={baseId} onChange={event => setBaseId(event.target.value)} /></label>
+            <label className="block">Airtable API key<input className={selectClass} type="password" autoComplete="off" value={apiKey} onChange={event => setApiKey(event.target.value)} /></label>
+          </>}
+          {step === 1 && <>
+            <p>Ingredients and products can come from the same table if a field identifies each type.</p>
+            {flexibleKinds.map(kind => {
+              const entity = entities.find(e => e.kind === kind), table = tableFor(kind);
+              const fields = table?.fields ?? [];
+              const choices = fields.find(field => field.id === entity?.filter?.fieldId)?.options?.choices ?? [];
+              return <section key={kind} className={card}>
+                <h4 className="text-base font-semibold">{flexibleNames[kind]}</h4>
+                <label className="block">{flexibleNames[kind]} table<select className={selectClass} value={entity?.tableId ?? ''} onChange={e => changeTable(kind, e.target.value)}>
+                  <option value="">Not connected</option>{tables.filter(t => kind === 'company' || t.id !== company?.tableId).map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
+                {!entity && kind !== 'company' && <p>{airtableMappingCopy.missing(flexibleNames[kind])}</p>}
+                {entity && <>
+                  <label className="block">{kind === 'company' ? 'Company type filter' : 'Item type filter'}
+                    <select className={selectClass} value={entity.filter?.fieldId ?? ''} onChange={e => {
+                      const fieldId = e.target.value;
+                      updateEntity(kind, previous => ({ ...previous, filter: fieldId ? {fieldId, operator: 'in', values: []} : undefined }));
+                    }}><option value="">All records</option>{fields.filter(f => f.type === 'singleSelect').map(option)}</select>
+                  </label>
+                  {choices.length > 0 && <fieldset className="space-y-1"><legend>Include these values</legend>{choices.map(choice => <label key={choice.name} className="flex min-h-11 items-center gap-2">
+                    <input type="checkbox" checked={entity.filter!.values.includes(choice.name)} onChange={event => {
+                      const checked = event.target.checked;
+                      updateEntity(kind, previous => ({ ...previous, filter: { ...previous.filter!, values: checked ? [...previous.filter!.values, choice.name] : previous.filter!.values.filter(value => value !== choice.name) } }));
+                    }} />{choice.name}</label>)}</fieldset>}
+                  {flexibleFields[kind].map(([key, label]) => <div key={key} className="space-y-1">
+                    <label className="block">{label}<select aria-label={label} className={selectClass} value={entity.fields[key]?.fieldId ?? ''} onChange={event => {
+                      const field = fields.find(f => f.id === event.target.value);
+                      updateEntity(kind, previous => {
+                        const updated = { ...previous.fields };
+                        if (!field) delete updated[key];
+                        else updated[key] = {fieldId: field.id, fieldName: field.name, expectedType: field.type, writable: false};
+                        return { ...previous, fields: updated };
+                      });
+                    }}><option value="">Not connected</option>{fields.map(option)}</select></label>
+                    {entity.fields[key] && access === 'readwrite' && key !== 'locAttachment' && <label className="flex min-h-11 items-center gap-2 text-sm">
+                      <input type="checkbox" checked={entity.fields[key].writable} onChange={event => {
+                        const writable = event.target.checked;
+                        updateEntity(kind, previous => ({ ...previous, fields: { ...previous.fields, [key]: { ...previous.fields[key], writable } } }));
+                      }} />Allow editing {label}</label>}
+                  </div>)}
+                </>}
+              </section>;
+            })}
+            <p>{airtableMappingCopy.missing('Contacts')}</p>
+          </>}
+          {step === 2 && flexibleKinds.slice(1).map(kind => {
+            const entity = entities.find(e => e.kind === kind);
+            if (!entity || !company) return <p key={kind}>{airtableMappingCopy.missing(flexibleNames[kind])}</p>;
+            const relation = relations.find(r => r.fromEntity === entity.id);
+            const owner = relation?.ownership;
+            const fields = tableFor(owner === 'to' ? 'company' : kind)?.fields ?? [];
+            return <section key={kind} className={card}><h4 className="font-semibold">{flexibleNames[kind]}</h4>
+              <label className="block">Which table stores the connection?<select className={selectClass} value={owner ?? ''} onChange={event => {
+                const ownership = event.target.value as 'from' | 'to' | '';
+                setRelations(previous => [...previous.filter(r => r.fromEntity !== entity.id), ...(ownership ? [{
+                  id: kind, fromEntity: entity.id, toEntity: company.id, ownership, kind: ownership === 'to' ? 'reverse-linked-record' : 'linked-record',
+                  cardinality: 'many-to-one', writable: false,
+                } satisfies RelationshipMapping] : [])]);
+                setCardinalitySet(previous => new Set([...previous].filter(id => id !== kind)));
+              }}><option value="">Not connected</option><option value="from">{tableFor(kind)?.name} ({flexibleNames[kind]})</option>
+                <option value="to">{tableFor('company')?.name} (Companies)</option></select></label>
+              {relation && <>
+                <label className="block">Relationship field<select className={selectClass} value={relation.fieldId ?? ''} onChange={event => {
+                  const field = fields.find(f => f.id === event.target.value);
+                  updateRelation(relation.id, previous => ({ ...previous, fieldId: field?.id, fieldName: field?.name,
+                    kind: owner === 'to' ? 'reverse-linked-record' : field?.type === 'multipleRecordLinks' ? 'linked-record' : 'text-reference',
+                    writable: false }));
+                }}><option value="">Choose a field</option>{fields.filter(f => f.type === 'multipleRecordLinks' || owner === 'from' && ['singleLineText', 'multilineText'].includes(f.type)).map(option)}</select></label>
+                <label className="block">Can one item belong to more than one company?<select className={selectClass}
+                  value={cardinalitySet.has(relation.id) ? relation.cardinality === 'one-to-one' ? 'many-to-one' : relation.cardinality : ''} onChange={event => {
+                    const cardinality = event.target.value as RelationshipMapping['cardinality'];
+                    if (!cardinality) return;
+                    setCardinalitySet(previous => new Set([...previous, relation.id]));
+                    updateRelation(relation.id, previous => ({...previous, cardinality}));
+                  }}><option value="">Choose an answer</option><option value="many-to-one">No</option><option value="many-to-many">Yes</option></select></label>
+                <label className="flex min-h-11 items-center gap-2"><input type="checkbox" checked={relation.writable}
+                  disabled={access !== 'readwrite' || relation.kind === 'text-reference' || !relation.fieldId || !cardinalitySet.has(relation.id)}
+                  onChange={event => {const writable = event.target.checked; updateRelation(relation.id, previous => ({...previous, writable}));}} />Allow Shutfey to change this connection</label>
+              </>}
+            </section>;
+          })}
+          {step === 3 && <>
+            <p>Check that the right records appear under the right companies before saving.</p>
+            {preview && <>
+              {preview.companies.map(company => <section key={company.id} className={card}>
+                <h4 className="break-words font-semibold">{company.name}</h4>
+                {(['ingredients', 'products'] as const).map(list => preview.connected[list === 'ingredients' ? 'ingredient' : 'product'] &&
+                  <p key={list} className="break-words text-sm">{list === 'ingredients' ? 'Ingredients' : 'Products'} · {company[list].join(', ') || '—'}</p>)}
+              </section>)}
+              {flexibleKinds.map(kind => <section key={kind} className={card}>
+                <h4 className="font-semibold">{flexibleNames[kind]}</h4>
+                <p>{preview.issues.some(issue => issue.entity === kind) ? 'Needs attention' :
+                  preview.connected[kind] ? (kind === 'company' ? Object.values(preview.fields[kind] ?? {}).includes('Ready') ? 'Ready' : 'Read only' : preview.relationships[kind] ?? 'Read only') : 'Not connected'}</p>
+                {!preview.connected[kind] && kind !== 'company' && <p>{airtableMappingCopy.missing(flexibleNames[kind])}</p>}
+                <ul className="space-y-1 text-sm text-ink-soft">
+                  {Object.entries(preview.fields[kind] ?? {}).map(([key, status]) => <li key={key}>{flexibleFields[kind].find(([field]) => field === key)?.[1]} · {status}</li>)}
+                  {preview.issues.filter(issue => issue.entity === kind).map((issue, index) => <li key={index} role="status">{issue.message}</li>)}
+                </ul>
+              </section>)}
+              <p>{airtableMappingCopy.missing('Contacts')}</p>
+
+            </>}
+          </>}
+        </fieldset>
+        {busy && <p role="status">Reading Airtable…</p>}
+        {error && <p role="alert" className="text-bad">{error}</p>}
+        {message && <p role="status">{message}</p>}
+      </div>
+      <footer className="flex shrink-0 flex-wrap justify-end gap-2 border-t border-line p-4 sm:px-6">
+        {step > 0 && !message && <button className={sourceButton} disabled={busy} onClick={() => {setError(''); setStep(step - 1);}}>Back</button>}
+        {step === 3 && !message && <button className={sourceButton} disabled={busy} onClick={() => void run('preview')}>Test mapping</button>}
+        {!message && <button className={`${sourceButton.replace('border-line-control bg-surface', 'border-gold-deep bg-gold-deep').replace('text-ink', 'text-paper')}`} disabled={busy ||
+          (step === 0 && (!baseId.trim() || !apiKey.trim() && !(connection.hasKey && baseId.trim() === connection.baseId))) ||
+          (step === 1 && (!company?.fields.name || entities.some(e => !e.fields.name || e.filter && !e.filter.values.length))) ||
+          (step === 2 && relations.some(r => !r.fieldId || !cardinalitySet.has(r.id))) ||
+          (step === 3 && (!preview || preview.issues.some(issue => issue.blocking)))}
+          onClick={() => step === 0 ? void run('discover') : step === 3 ? void run('save') : advance()}>
+          {step === 0 ? 'Find your Airtable tables' : step === 3 ? 'Save connection' : 'Continue'}
+        </button>}
+      </footer>
+    </div>
+  </dialog>;
 }

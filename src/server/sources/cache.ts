@@ -12,6 +12,7 @@ export interface Backup {
 }
 export interface SourceState {
   status: 'never' | 'ok' | 'stale' | 'backup' | 'error'; refreshedAt?: string; calls: number;
+  connectedLists?: SourceData['connectedLists']; mappingIssues?: SourceData['mappingIssues']; relationshipWrites?: SourceData['relationshipWrites'];
   companies: Company[]; otherCompanies?: SourceData['otherCompanies']; itemsFor(companyId: string, kind: 'ingredient' | 'product'): (Ingredient | Product)[];
   companyBackupTimes?: Record<string,string>; backupTakenAt?: string; backupError?: string; error?: string;
 }
@@ -52,6 +53,7 @@ export function createSourceCache({ connectorFor, backups, group1SettingsFor, ma
   function publish(id: string, data: SourceData, status: SourceState['status'], fields: Partial<SourceState>) {
     const e = entry(id); e.data = data;
     e.state = { status, calls: 0, companies: data.companies, otherCompanies: data.otherCompanies ?? [],
+      ...(data.connectedLists && { connectedLists: data.connectedLists, mappingIssues: data.mappingIssues, relationshipWrites: data.relationshipWrites }),
       itemsFor: (companyId, kind) => (kind === 'ingredient' ? data.ingredients : data.products).filter(i => i.companyIds.includes(companyId)), ...fields };
   }
   async function run(id: string): Promise<RefreshResult> {
