@@ -806,7 +806,7 @@ export function FlexibleAirtableWizard({ connection, onSaved, onClose }: Props) 
                 <input type="checkbox" className="accent-ink focus-visible:ring-2 focus-visible:ring-gold" checked={allShownSelected} disabled={!shownVenues.length}
                   onChange={event => {
                     const ids = shownVenues.map(venue => venue.id);
-                    if (event.target.checked) setSelected(new Set(ids));
+                    if (event.target.checked) toggleSelected(ids, true);
                     else toggleSelected(ids, false);
                   }} />
                 Select all shown venues
@@ -836,7 +836,7 @@ export function FlexibleAirtableWizard({ connection, onSaved, onClose }: Props) 
               </ul>
             </> : <p>No venues were found in the connected company list.</p>)}
           </>}
-          {step === 4 && counts && <p>{`${counts.factory} factories and ${counts.food_service} food service places. You can change any venue later from the Factories screen or the Food service screen.`}</p>}
+          {step === 4 && counts && <p>{`${counts.factory} ${counts.factory === 1 ? 'factory' : 'factories'} and ${counts.food_service} food service ${counts.food_service === 1 ? 'place' : 'places'}. You can change any venue later from the Factories screen or the Food service screen.`}</p>}
           {(step === 2 && preview || step === 4) && <>
             {step === 2 && <p>Check that the right records appear under the right companies before saving.</p>}
             {preview && <>
@@ -872,7 +872,7 @@ export function FlexibleAirtableWizard({ connection, onSaved, onClose }: Props) 
         }}>Back</button>}
         {step === 2 && preview && <button className={sourceButton} disabled={busy} onClick={() => void run('preview')}>Test mapping</button>}
         {step === 3 && error && !venues && <button className={sourceButton} disabled={busy} onClick={() => void run('retry')}>Try again</button>}
-        {step === 3 && error && <button className={sourceButton} disabled={busy} onClick={() => { setError(''); setStep(4); }}>Skip this step</button>}
+        {step === 3 && error && !venues && <button className={sourceButton} disabled={busy} onClick={() => { setError(''); setStep(4); }}>Skip this step</button>}
         {!message && <button className={sourceButton.replace('border-line-control bg-surface', 'border-gold-deep bg-gold-deep').replace('text-ink', 'text-paper')} disabled={busy ||
           (step === 0 && (!baseId.trim() || !apiKey.trim() && !(connection.hasKey && baseId.trim() === connection.baseId))) ||
           (step === 1 && (!company?.fields.name || entities.some(e => !e.fields.name || e.filter && !e.filter.values.length))) ||
